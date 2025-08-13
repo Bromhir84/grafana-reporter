@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 RUN apt-get update
 RUN apt-get install git-all -y
-
+RUN apt-get update && apt-get install -y libjpeg-dev zlib1g-dev gcc git && rm -rf /var/lib/apt/lists/*
 # Set working directory
 WORKDIR /app
 
