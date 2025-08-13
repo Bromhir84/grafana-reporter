@@ -8,6 +8,9 @@ WORKDIR /app
 
 # Copy the setup script.
 COPY setup.sh /app/setup.sh
+RUN useradd -m appuser
+RUN chown appuser:appuser /app/setup.sh
+USER appuser
 
 # Set the script as executable
 RUN chmod +x /app/setup.sh
