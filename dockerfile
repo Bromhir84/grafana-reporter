@@ -8,7 +8,7 @@ WORKDIR /app
 COPY setup.sh /app/setup.sh
 
 # Set the script as executable
-RUN chmod +x app/setup.sh
+RUN chmod +x /app/setup.sh
 
 # Entrypoint to start your app
 ENTRYPOINT ["python", "/app/setup.sh"]

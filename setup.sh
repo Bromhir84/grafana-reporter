@@ -8,5 +8,5 @@ else
     cd /app
 fi
 
-chmod -x /app/start.sh
+chmod +x /app/start.sh
 ./app/start.sh
