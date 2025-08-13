@@ -13,4 +13,4 @@ else
 fi
 
 chmod +x /app/start.sh
-./app/start.sh
+exec /app/start.sh
