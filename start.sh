@@ -8,4 +8,4 @@ apt-get update && apt-get install -y \
 # Install Python dependencies
 pip install --no-cache-dir -r requirements.txt
 
-./app/uvicorn report_api:app --host 0.0.0.0 --port 8000
+./app/repo/uvicorn report_api:app --host 0.0.0.0 --port 8000
