@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
-app = FastAPI(root_path="/report")
+app = FastAPI(root_path=os.getenv("ROOT_PATH","/report"))
 
 # Allow Grafana front-end to call this API
 app.add_middleware(
