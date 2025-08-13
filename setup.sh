@@ -1,8 +1,8 @@
 #!/bin/bash
-set -e  # Exit on error
+set -e
 
 # Clone or update repo
-if [ ! -d "/app/.git" ]; then
+if [ ! -d "/app/repo/.git" ]; then
     echo "Cloning repository..."
     git clone https://github.com/Bromhir84/grafana-reporter.git /app/repo
 else
@@ -11,5 +11,12 @@ else
     git pull
 fi
 
-chmod +x /app/repo/start.sh
-exec /app/repo/start.sh
+# Install Python dependencies
+pip install --user --no-cache-dir -r /app/repo/requirements.txt
+
+# Ensure local pip bin is in PATH
+export PATH="$HOME/.local/bin:$PATH"
+
+# Run repo's start script
+cd /app/repo
+exec bash start.sh
