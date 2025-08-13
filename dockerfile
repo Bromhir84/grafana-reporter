@@ -9,6 +9,10 @@ WORKDIR /app
 # Copy the setup script.
 COPY setup.sh /app/setup.sh
 RUN useradd -m appuser
+RUN mkdir -p /app/repo
+
+# Change ownership of the app directory to the new user
+RUN chown -R appuser:appuser /app
 RUN chown appuser:appuser /app/setup.sh
 USER appuser
 
