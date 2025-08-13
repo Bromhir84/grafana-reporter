@@ -7,4 +7,4 @@ echo "Dependencies installed."
 
 echo "Starting server..."
 cd /app/repo
-python3 -m uvicorn report_api:app --host 0.0.0.0 --port 8000
+uvicorn report_api:app --host 0.0.0.0 --port 8000

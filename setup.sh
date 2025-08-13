@@ -21,4 +21,4 @@ export PATH="$HOME/.local/bin:$PATH"
 echo "Starting application..."
 cd /app/repo
 chmod +x start.sh
-exec ./start.sh >/dev/null 2>&1
+exec ./start.sh
