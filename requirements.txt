@@ -1,0 +1,7 @@
+requests
+img2pdf
+fastapi
+uvicorn
+pillow
+img2pdf
+requests
