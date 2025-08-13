@@ -11,9 +11,6 @@ else
     git pull
 fi
 
-# Install Python dependencies
-pip install --user --no-cache-dir -r /app/repo/requirements.txt
-
 # Ensure local pip bin is in PATH
 export PATH="$HOME/.local/bin:$PATH"
 
