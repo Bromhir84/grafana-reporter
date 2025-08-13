@@ -1,6 +1,10 @@
 #!/bin/bash
+set -e
 
-# Install Python dependencies
-pip install --user --no-cache-dir -r /app/repo/requirements.txt
+echo "Installing Python dependencies..."
+pip install --user --no-cache-dir -q -r /app/repo/requirements.txt
+echo "Dependencies installed."
 
-uvicorn report_api:app --host 0.0.0.0 --port 8000
+echo "Starting server..."
+cd /app/repo
+exec uvicorn report_api:app --host 0.0.0.0 --port 8000
