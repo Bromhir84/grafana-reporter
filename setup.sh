@@ -1,4 +1,6 @@
 #!/bin/bash
+apt-get update
+apt-get install git-all -y
 
 if [ ! -d "/app" ]; then
     git clone https://github.com/Bromhir84/grafana-reporter.git /app

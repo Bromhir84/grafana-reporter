@@ -11,4 +11,4 @@ COPY setup.sh /app/setup.sh
 RUN chmod +x /app/setup.sh
 
 # Entrypoint to start your app
-ENTRYPOINT ["python", "/app/setup.sh"]
+ENTRYPOINT ["/app/setup.sh", ""]
