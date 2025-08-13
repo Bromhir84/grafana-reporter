@@ -19,4 +19,5 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # Run repo's start script
 cd /app/repo
-exec bash start.sh
+chmod +x start.sh
+exec ./start.sh
