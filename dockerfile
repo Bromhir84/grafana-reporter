@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 
+RUN apt-get update
+RUN apt-get install git-all -y
 
 # Set working directory
 WORKDIR /app
