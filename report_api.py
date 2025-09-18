@@ -203,7 +203,42 @@ def download_specific_table_csv(dashboard_url, panel_name="Total consumption", o
     logger.info(f"CSV export finished, downloaded {len(csv_files)} files")
     return csv_files
 
+def list_dashboard_panels(dashboard_url, api_key=None):
+    import os
+    from playwright.sync_api import sync_playwright
 
+    logger.info(f"Opening dashboard: {dashboard_url}")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            extra_http_headers={"Authorization": f"Bearer {api_key}"} if api_key else {}
+        )
+        page = context.new_page()
+        page.goto(dashboard_url)
+        page.wait_for_timeout(8000)  # wait for dashboard to render
+        logger.info("Dashboard loaded")
+
+        # Try to locate all panel titles
+        panel_headers = page.query_selector_all("h2")  # adjust selector if needed
+        found_titles = []
+        for ph in panel_headers:
+            try:
+                title = ph.inner_text().strip()
+                found_titles.append(title)
+            except Exception as e:
+                logger.warning(f"Error reading panel title: {e}")
+
+        if found_titles:
+            logger.info("Panels found on dashboard:")
+            for t in found_titles:
+                logger.info(f" - {t}")
+        else:
+            logger.warning("No panels found on the dashboard.")
+
+        browser.close()
+        return found_titles
+    
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
     temp_uid = None
@@ -230,16 +265,17 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
         # Step 3: Download CSV only for the "Total consumption" panel
         if email_to:
-            try:
-                csv_files = download_specific_table_csv(
-                    dashboard_url=f"{GRAFANA_URL}/d/{temp_uid}",
-                    panel_name="Total consumption",
-                    output_dir="/tmp/grafana_csvs",
-                    api_key=GRAFANA_API_KEY
-                )
-                logger.info(f"Downloaded {len(csv_files)} CSVs for 'Total consumption'")
-            except Exception as e:
-                logger.error(f"Failed to download CSV for 'Total consumption': {e}")
+            list_dashboard_panels(f"{GRAFANA_URL}/d/{temp_uid}", api_key=GRAFANA_API_KEY)
+            # try:
+            #     csv_files = download_specific_table_csv(
+            #         dashboard_url=f"{GRAFANA_URL}/d/{temp_uid}",
+            #         panel_name="Total consumption",
+            #         output_dir="/tmp/grafana_csvs",
+            #         api_key=GRAFANA_API_KEY
+            #     )
+            #     logger.info(f"Downloaded {len(csv_files)} CSVs for 'Total consumption'")
+            # except Exception as e:
+            #     logger.error(f"Failed to download CSV for 'Total consumption': {e}")
 
         # Step 4: Send email with PDF and CSV attachments
         if email_to:
