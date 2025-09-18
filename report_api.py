@@ -4,11 +4,14 @@
 import os
 import re
 import io
+import csv
+import time
 import img2pdf
 import requests
 from datetime import datetime
 from email.message import EmailMessage
 import smtplib
+import pandas as pd
 from PIL import Image
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -189,7 +192,6 @@ def list_dashboard_panels(dashboard_url, api_key=None):
         browser.close()
         return list(panel_titles)
 
-
 def query_prometheus(promql):
     """Query Prometheus and return a list of results."""
     resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": promql})
@@ -198,43 +200,6 @@ def query_prometheus(promql):
     if data["status"] != "success":
         raise ValueError("Prometheus query failed")
     return data["data"]["result"]
-
-def build_total_consumption_table(cluster=None, projects=None, departments=None, time_range="1h"):
-    """Build a table similar to the Grafana 'Total consumption' panel."""
-    
-    # Define PromQL expressions for each metric
-    queries = {
-        "GPU allocation hours": f'sum(sum_over_time((runai_allocated_gpu_count_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600',
-        "CPU allocation hours": f'sum(sum_over_time((runai_allocated_millicpus_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (department, project) / 3600 / 1000',
-        "Memory (GB) allocation hours": f'sum(sum_over_time((runai_allocated_memory_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600 / 1e9',
-        "CPU usage hours": f'sum(sum_over_time((runai_used_cpu_cores_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600',
-        "Memory (GB) usage hours": f'sum(sum_over_time((runai_used_memory_bytes_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600 / 1e9',
-        "GPU Idle allocated hours": f'sum(sum_over_time((runai_gpu_idle_hours_per_queue:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600'
-    }
-
-    dfs = []
-    for name, expr in queries.items():
-        results = query_prometheus(expr)
-        # Convert each Prometheus result to DataFrame
-        rows = []
-        for r in results:
-            metric = r.get("metric", {})
-            project = metric.get("project")
-            department = metric.get("department", "")
-            value = float(r["value"][1])
-            rows.append({"Project": project, "Department": department, name: value})
-        if rows:
-            df = pd.DataFrame(rows)
-            dfs.append(df)
-
-    # Merge all metrics on Project + Department
-    if not dfs:
-        return pd.DataFrame()  # no data
-
-    from functools import reduce
-    table = reduce(lambda left, right: pd.merge(left, right, on=["Project","Department"], how="outer"), dfs)
-    table = table.fillna(0)  # fill missing metrics with 0
-    return table
 
 def resolve_grafana_vars(query: str, variables: dict) -> str:
     """Replace Grafana-style template variables with provided values."""
