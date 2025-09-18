@@ -270,12 +270,12 @@ def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: date
     """Replace Grafana template variables with provided values, including $__range."""
     for var, value in variables.items():
         if not value or value == "$__all":
-            value = ".*"
-        query = query.replace(f"${var}", value)
-    
+            value = ".*"  # <-- this must be a plain regex
+        query = re.sub(rf"\['?\$?{var}'?\]", value, query)  # replace $var or ['$var'] with correct regex
+
     # Replace $__range with the correct duration
     query = query.replace("$__range", compute_prometheus_duration(start, end))
-    
+
     return query
 
 def query_prometheus(expr: str):
