@@ -192,15 +192,6 @@ def list_dashboard_panels(dashboard_url, api_key=None):
         browser.close()
         return list(panel_titles)
 
-def query_prometheus(promql):
-    """Query Prometheus and return a list of results."""
-    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": promql})
-    resp.raise_for_status()
-    data = resp.json()
-    if data["status"] != "success":
-        raise ValueError("Prometheus query failed")
-    return data["data"]["result"]
-
 def resolve_grafana_vars(query: str, variables: dict) -> str:
     """Replace Grafana-style template variables with provided values."""
     for var, value in variables.items():
@@ -247,14 +238,16 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             combined_df = None
 
             for expr in panel["queries"]:
+                # Resolve Grafana variables before querying Prometheus
+                expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS)
                 try:
-                    results = query_prometheus(expr)
+                    results = query_prometheus(expr_resolved)
                 except Exception as e:
-                    logger.error(f"Prometheus query failed for {expr}: {e}")
+                    logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
 
                 rows = []
-                for r in results:
+                for r in results.get("data", {}).get("result", []):
                     metric = r.get("metric", {})
                     try:
                         value = float(r["value"][1])
