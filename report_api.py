@@ -222,6 +222,8 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
 
+    logger.info(f"Opening dashboard for CSV export: {dashboard_url}")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(extra_http_headers={
@@ -231,50 +233,71 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
         page = context.new_page()
         page.goto(dashboard_url)
         page.wait_for_timeout(8000)  # wait for dashboard to render
+        logger.info("Dashboard loaded, looking for panels...")
 
         panels = page.query_selector_all("div.panel-content")
+        logger.info(f"Found {len(panels)} panels")
+
         for idx, panel in enumerate(panels, start=1):
             try:
+                panel_title_elem = panel.query_selector("div.panel-title-text")
+                panel_title = panel_title_elem.inner_text().strip() if panel_title_elem else f"panel_{idx}"
+                logger.info(f"Processing panel {idx}: '{panel_title}'")
+
                 panel.hover()
-                # Open More options menu
                 menu_btn = panel.query_selector('button[aria-label="More options"]')
                 if not menu_btn:
+                    logger.warning(f"Panel '{panel_title}': No menu button found, skipping CSV export")
                     continue
+                logger.info(f"Panel '{panel_title}': Menu button found")
                 menu_btn.click()
+                logger.info(f"Panel '{panel_title}': Clicked 'More options'")
 
                 # Click Inspect → Data
-                page.locator("text=Inspect").click()
-                page.locator("text=Data").click()
-
-                # Wait for CSV button to appear
-                page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
-                csv_button = page.locator('button:has-text("Download CSV")')
-                if csv_button.count() == 0:
+                inspect_btn = page.locator("text=Inspect")
+                if inspect_btn.count() == 0:
+                    logger.warning(f"Panel '{panel_title}': 'Inspect' button not found")
                     continue
+                inspect_btn.click()
+                logger.info(f"Panel '{panel_title}': Clicked 'Inspect'")
 
-                # Intercept download
-                with page.expect_download() as download_info:
-                    csv_button.click()
-                download = download_info.value
+                data_btn = page.locator("text=Data")
+                if data_btn.count() == 0:
+                    logger.warning(f"Panel '{panel_title}': 'Data' button not found")
+                    continue
+                data_btn.click()
+                logger.info(f"Panel '{panel_title}': Clicked 'Data'")
 
-                # Safe panel title
-                title_elem = panel.query_selector("div.panel-title-text")
-                panel_title = title_elem.inner_text().strip() if title_elem else f"panel_{idx}"
-                safe_title = panel_title.replace(" ", "_").replace("$", "").replace("/", "_")
+                # Wait for CSV button
+                try:
+                    page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
+                    csv_button = page.locator('button:has-text("Download CSV")')
+                    if csv_button.count() == 0:
+                        logger.warning(f"Panel '{panel_title}': 'Download CSV' button not found")
+                        continue
 
-                csv_path = os.path.join(output_dir, f"{safe_title}.csv")
-                download.save_as(csv_path)
-                csv_files.append(csv_path)
-                logger.info(f"Downloaded CSV for panel '{panel_title}' → {csv_path}")
+                    with page.expect_download() as download_info:
+                        csv_button.click()
+                    download = download_info.value
 
-                # Go back to dashboard for next panel
+                    safe_title = panel_title.replace(" ", "_").replace("$", "").replace("/", "_")
+                    csv_path = os.path.join(output_dir, f"{safe_title}.csv")
+                    download.save_as(csv_path)
+                    csv_files.append(csv_path)
+                    logger.info(f"Downloaded CSV for panel '{panel_title}' → {csv_path}")
+
+                except Exception as e:
+                    logger.error(f"Panel '{panel_title}': Error waiting for or clicking 'Download CSV': {e}")
+
+                # Go back to dashboard before next panel
                 page.goto(dashboard_url)
                 page.wait_for_timeout(2000)
 
             except Exception as e:
-                logger.error(f"Failed to download CSV for panel '{idx}': {e}")
+                logger.error(f"Unexpected error processing panel {idx}: {e}")
 
         browser.close()
+    logger.info(f"CSV export finished, downloaded {len(csv_files)} files")
     return csv_files
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
