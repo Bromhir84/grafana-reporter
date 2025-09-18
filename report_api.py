@@ -276,6 +276,10 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             for expr in panel["queries"]:
                 # Resolve Grafana variables before querying Prometheus
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS)
+
+                # Log the resolved query
+                logger.info(f"Executing Prometheus query: {expr_resolved}")
+
                 try:
                     results = query_prometheus(expr_resolved)
                 except Exception as e:
