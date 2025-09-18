@@ -220,22 +220,10 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
     """
     Downloads all table panels from a Grafana dashboard using Playwright.
     Returns a list of local CSV file paths.
+    This version detects table panels by the presence of the 'Download CSV' button.
     """
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
-
-    # Panels to target by title (adjust or leave empty to download all table panels)
-    # You can also dynamically fetch titles from get_dashboard_panels()
-    table_panel_titles = [
-        "Cumulative GPU allocation per $grouping",
-        "Cumulative CPU allocation per $grouping",
-        "Cumulative memory allocation per $grouping",
-        "Consumption types",
-        "Total consumption",
-        "Total department consumption",
-        "GPU allocation over time",
-        "Project over-quota GPU consumption"
-    ]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -246,59 +234,56 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
         page = context.new_page()
         page.goto(dashboard_url)
 
-        # Wait for dashboard panels to load
-        page.wait_for_timeout(8000)  # Adjust depending on dashboard complexity
+        # Wait for dashboard to render
+        page.wait_for_timeout(8000)  # 8 seconds, adjust for complex dashboards
 
-        # Select all panels
+        # Find all panel containers
         panel_elements = page.query_selector_all("div.panel-content")
 
         for idx, panel in enumerate(panel_elements, start=1):
             try:
-                # Get panel title
-                title_elem = panel.query_selector("div.panel-title-text")
-                if not title_elem:
-                    continue
-                title_text = title_elem.inner_text().strip()
-
-                if title_text not in table_panel_titles:
-                    continue  # Skip non-table panels
-
-                logger.info(f"Processing table panel: {title_text}")
-
-                # Hover and open menu
                 panel.hover()
+
+                # Open panel menu
                 menu_button = panel.query_selector('button[aria-label="More options"]')
                 if not menu_button:
-                    logger.warning(f"Menu button not found for panel '{title_text}'")
                     continue
                 menu_button.click()
                 page.locator("text=Inspect").click()
                 page.locator("text=Data").click()
 
                 # Wait for Download CSV button
-                page.wait_for_selector('button:has-text("Download CSV")', timeout=5000)
+                page.wait_for_timeout(1000)
                 csv_button = page.locator('button:has-text("Download CSV")')
+                if csv_button.count() == 0:
+                    continue  # Not a table panel
 
                 # Intercept download
                 with page.expect_download() as download_info:
                     csv_button.click()
                 download = download_info.value
-                safe_title = title_text.replace(" ", "_").replace("$", "")
+
+                # Determine panel title safely
+                title_elem = panel.query_selector("div.panel-title-text")
+                panel_title = title_elem.inner_text().strip() if title_elem else f"panel_{idx}"
+                safe_title = panel_title.replace(" ", "_").replace("$", "").replace("/", "_")
+
                 csv_path = os.path.join(output_dir, f"{safe_title}.csv")
                 download.save_as(csv_path)
                 csv_files.append(csv_path)
 
-                logger.info(f"Downloaded CSV for panel '{title_text}' → {csv_path}")
+                logger.info(f"Downloaded CSV for panel '{panel_title}' → {csv_path}")
 
-                # Go back to dashboard
+                # Go back to dashboard before next panel
                 page.goto(dashboard_url)
                 page.wait_for_timeout(2000)
 
             except Exception as e:
-                logger.error(f"Failed to download CSV for panel '{title_text if title_elem else idx}': {e}")
+                logger.error(f"Failed to download CSV for panel '{idx}': {e}")
 
         browser.close()
     return csv_files
+
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
@@ -306,6 +291,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
     temp_uid = None
     csv_files = []
     try:
+        # Extract dashboard UID
         dashboard_uid = extract_uid_from_url(dashboard_url)
 
         # Fetch original dashboard title
@@ -327,7 +313,6 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         logger.info(f"Rendering dashboard at {render_url}")
         r = requests.get(render_url, headers=headers, stream=True, timeout=60)
         r.raise_for_status()
-
         img = Image.open(io.BytesIO(r.content))
 
         # Step 3: Paginate image to A4 pages
