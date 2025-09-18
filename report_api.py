@@ -1,3 +1,6 @@
+# ─────────────────────────────────────────────────────────────
+# FastAPI Grafana Report Script (PDF + CSV, temp dashboard)
+# ─────────────────────────────────────────────────────────────
 import os
 import re
 import io
@@ -7,41 +10,32 @@ from datetime import datetime
 from email.message import EmailMessage
 import smtplib
 from PIL import Image
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import logging
-import csv
 from playwright.sync_api import sync_playwright
 
-app = FastAPI(root_path=os.getenv("ROOT_PATH","/report"))
+app = FastAPI(root_path=os.getenv("ROOT_PATH", "/report"))
 
 # Allow Grafana front-end to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Or use ["http://your-grafana-domain"] for stricter security
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# ────────────────────────────────────────────────
-# Environment variables (set these before running the app)
-# ────────────────────────────────────────────────
+# Environment variables
 GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
 GRAFANA_API_KEY = os.getenv("GRAFANA_API_KEY")
-
 TIME_FROM = os.getenv("TIME_FROM", "now-6h")
 TIME_TO = os.getenv("TIME_TO", "now")
-
 EMAIL_FROM = os.getenv("EMAIL_FROM")
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-
-MAX_PAGE_WIDTH = 2480
 A4_WIDTH_PX = 2480
 A4_HEIGHT_PX = 3508
 A4_BG_COLOR = "white"
@@ -49,15 +43,13 @@ A4_BG_COLOR = "white"
 excluded_titles = ["Report Button", "Another panel"]
 excluded_titles_lower = [t.strip().lower() for t in excluded_titles]
 
-headers = {
-    "Authorization": f"Bearer {GRAFANA_API_KEY}"
-}
+headers = {"Authorization": f"Bearer {GRAFANA_API_KEY}"}
 
-# Setup logging
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
@@ -70,21 +62,15 @@ def extract_uid_from_url(url: str) -> str:
     match = re.search(r"/d/([^/]+)/", url)
     if match:
         return match.group(1)
-    else:
-        raise ValueError("Invalid dashboard URL format. Expected something like /d/<uid>/")
-    
+    raise ValueError("Invalid dashboard URL format. Expected /d/<uid>/")
+
 def filter_panels(panels, excluded_titles_lower):
     filtered = []
-    logger.info(f"Filtering panels, excluding titles: {excluded_titles_lower}")
     for panel in panels:
         title = panel.get("title", "").strip().lower()
         if "panels" in panel:
             panel["panels"] = filter_panels(panel["panels"], excluded_titles_lower)
-        if title in excluded_titles_lower:
-            logger.info(f"Excluding panel: '{title}'")
-            continue
-        else:
-            logger.info(f"Keeping panel: '{title}'")
+        if title not in excluded_titles_lower:
             filtered.append(panel)
     return filtered
 
@@ -93,40 +79,18 @@ def clone_dashboard_without_panels(original_uid, excluded_titles):
     url = f"{GRAFANA_URL}/api/dashboards/uid/{original_uid}"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
-    dashboard_data = r.json()
+    dashboard_data = r.json()["dashboard"]
 
-    dashboard = dashboard_data["dashboard"]
-    logger.info(f"Original dashboard has {len(dashboard.get('panels', []))} panels")
+    dashboard_data["panels"] = filter_panels(dashboard_data.get("panels", []), [t.lower() for t in excluded_titles])
+    dashboard_data["uid"] = f"{original_uid}-temp-{int(datetime.now().timestamp())}"
+    dashboard_data["title"] += " (Temp Render)"
 
-    logger.info("Panels before filtering:")
-    for p in dashboard.get("panels", []):
-        logger.info(f"  - '{p.get('title')}'")
-
-    # Remove panels by title
-    excluded_titles_lower = [t.lower() for t in excluded_titles]
-    dashboard["panels"] = filter_panels(dashboard.get("panels", []), excluded_titles_lower)
-    logger.info(f"Dashboard after filtering: {len(dashboard['panels'])} panels")
-
-    logger.info("Panels after filtering:")
-    for p in dashboard.get("panels", []):
-        logger.info(f"  - '{p.get('title')}'")
-
-    # Give a new UID and modify title
-    dashboard["uid"] = f"{original_uid}-temp-{int(datetime.now().timestamp())}"
-    dashboard["title"] += " (Temp Render)"
-
-    payload = {
-        "dashboard": dashboard,
-        "folderId": 0,
-        "overwrite": False
-    }
-
+    payload = {"dashboard": dashboard_data, "folderId": 0, "overwrite": False}
     save_url = f"{GRAFANA_URL}/api/dashboards/db"
     r = requests.post(save_url, headers=headers, json=payload)
     r.raise_for_status()
-    logger.info(f"Temporary dashboard created: {dashboard['uid']}")
-    return dashboard["uid"]
-
+    logger.info(f"Temporary dashboard created: {dashboard_data['uid']}")
+    return dashboard_data["uid"]
 
 def delete_dashboard(uid):
     url = f"{GRAFANA_URL}/api/dashboards/uid/{uid}"
@@ -135,44 +99,6 @@ def delete_dashboard(uid):
         logger.info(f"Deleted temporary dashboard {uid}")
     else:
         logger.warning(f"Could not delete dashboard {uid}: {r.text}")
-
-
-def get_dashboard_panels(dashboard_uid):
-    url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
-    logger.info(f"Fetching dashboard panels from {url}")
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    dashboard = response.json()
-
-    panels = []
-    for panel in dashboard["dashboard"].get("panels", []):
-        if "id" in panel and "gridPos" in panel:
-            size = panel["gridPos"]
-            panels.append({
-                "id": panel["id"],
-                "title": panel.get("title", "Unnamed Panel"),
-                "w": size.get("w", 24),
-                "h": size.get("h", 10),
-                "type": panel.get("type", "unknown")
-            })
-    logger.info(f"Found {len(panels)} panels")
-    return panels, dashboard["dashboard"].get("title", f"Dashboard-{dashboard_uid}")
-
-def render_full_dashboard(dashboard_uid):
-    # Render the entire dashboard as one large image
-    # You might need to adjust width for high‐res printing
-    px_width = A4_WIDTH_PX
-    px_height = 5000  # tall enough for most dashboards
-    url = (
-        f"{GRAFANA_URL}/render/d/{dashboard_uid}"
-        f"?theme=light&width={px_width}&height={px_height}"
-        f"&tz=UTC&from={TIME_FROM}&to={TIME_TO}&kiosk"
-    )
-
-    logger.info(f"Rendering full dashboard: {url}")
-    response = requests.get(url, headers=headers, stream=True, timeout=60)
-    response.raise_for_status()
-    return Image.open(io.BytesIO(response.content))
 
 def paginate_to_a4(img: Image.Image):
     pages = []
@@ -187,209 +113,107 @@ def paginate_to_a4(img: Image.Image):
         y_offset += A4_HEIGHT_PX
     return pages
 
-def generate_pdf(images, output_path):
-    with open(output_path, "wb") as f:
-        f.write(img2pdf.convert(images))
-
 def generate_pdf_from_pages(pages, output_path):
     with open(output_path, "wb") as f:
         f.write(img2pdf.convert(pages))
     logger.info(f"PDF saved to {output_path}")
 
-def send_email(dashboard_title, pdf_path, email_to):
-    msg = EmailMessage()
-    msg["Subject"] = f"Grafana Report - {dashboard_title} - {datetime.now().strftime('%Y-%m-%d')}"
-    msg["From"] = EMAIL_FROM
-    msg["To"] = email_to
-
-    with open(pdf_path, "rb") as f:
-        msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{dashboard_title}.pdf")
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            if SMTP_USERNAME and SMTP_PASSWORD:
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-        logger.info(f"Email sent to {email_to}")
-    except Exception as e:
-        logger.error(f"Failed to send email: {e}")
-        raise
-
-def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=None):
-    import os
-    from playwright.sync_api import sync_playwright
-
+def download_table_csvs(dashboard_uid, output_dir="/tmp/grafana_csvs"):
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
+    dashboard_url = f"{GRAFANA_URL}/d/{dashboard_uid}"
 
-    logger.info(f"Opening dashboard for CSV export: {dashboard_url}")
-
+    logger.info(f"Opening temporary dashboard for CSV export: {dashboard_url}")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(extra_http_headers={
-            "Authorization": f"Bearer {api_key}"
-        } if api_key else {})
-
+        context = browser.new_context(extra_http_headers={"Authorization": f"Bearer {GRAFANA_API_KEY}"})
         page = context.new_page()
         page.goto(dashboard_url)
-        page.wait_for_timeout(8000)  # wait for dashboard to render
-        logger.info("Dashboard loaded, looking for panels...")
+        page.wait_for_timeout(8000)
 
-        # Use stable selector
         panels = page.query_selector_all("div[data-testid='data-testid panel content']")
         logger.info(f"Found {len(panels)} panels")
 
         for idx, panel in enumerate(panels, start=1):
             try:
-                # Find the panel title from the closest section
                 panel_header = panel.evaluate_handle("el => el.closest('section').querySelector('h2')")
                 panel_title = panel_header.inner_text().strip() if panel_header else f"panel_{idx}"
-                logger.info(f"Processing panel {idx}: '{panel_title}'")
+                safe_title = panel_title.replace(" ", "_").replace("/", "_").replace("$", "")
+                logger.info(f"Processing panel '{panel_title}'")
 
                 panel.hover()
                 menu_btn = panel.query_selector('button[aria-label^="Menu for panel"]')
                 if not menu_btn:
-                    logger.warning(f"Panel '{panel_title}': No menu button found, skipping CSV export")
+                    logger.warning(f"Panel '{panel_title}': No menu button found, skipping CSV")
                     continue
-                logger.info(f"Panel '{panel_title}': Menu button found")
                 menu_btn.click()
-                logger.info(f"Panel '{panel_title}': Clicked 'More options'")
+                page.locator("text=Inspect").click()
+                page.locator("text=Data").click()
 
-                # Click Inspect → Data
-                inspect_btn = page.locator("text=Inspect")
-                if inspect_btn.count() == 0:
-                    logger.warning(f"Panel '{panel_title}': 'Inspect' button not found")
-                    continue
-                inspect_btn.click()
-                logger.info(f"Panel '{panel_title}': Clicked 'Inspect'")
-
-                data_btn = page.locator("text=Data")
-                if data_btn.count() == 0:
-                    logger.warning(f"Panel '{panel_title}': 'Data' button not found")
-                    continue
-                data_btn.click()
-                logger.info(f"Panel '{panel_title}': Clicked 'Data'")
-
-                # Wait for CSV button
-                try:
-                    page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
-                    csv_button = page.locator('button:has-text("Download CSV")')
-                    if csv_button.count() == 0:
-                        logger.warning(f"Panel '{panel_title}': 'Download CSV' button not found")
-                        continue
-
-                    with page.expect_download() as download_info:
-                        csv_button.click()
-                    download = download_info.value
-
-                    safe_title = panel_title.replace(" ", "_").replace("$", "").replace("/", "_")
-                    csv_path = os.path.join(output_dir, f"{safe_title}.csv")
-                    download.save_as(csv_path)
-                    csv_files.append(csv_path)
-                    logger.info(f"Downloaded CSV for panel '{panel_title}' → {csv_path}")
-
-                except Exception as e:
-                    logger.error(f"Panel '{panel_title}': Error waiting for or clicking 'Download CSV': {e}")
-
-                # Go back to dashboard before next panel
+                page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
+                with page.expect_download() as download_info:
+                    page.locator('button:has-text("Download CSV")').click()
+                download = download_info.value
+                csv_path = os.path.join(output_dir, f"{safe_title}.csv")
+                download.save_as(csv_path)
+                csv_files.append(csv_path)
+                logger.info(f"Downloaded CSV → {csv_path}")
                 page.goto(dashboard_url)
                 page.wait_for_timeout(2000)
 
             except Exception as e:
-                logger.error(f"Unexpected error processing panel {idx}: {e}")
+                logger.error(f"Error processing panel {idx}: {e}")
 
         browser.close()
-
     logger.info(f"CSV export finished, downloaded {len(csv_files)} files")
     return csv_files
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
-
     temp_uid = None
-    csv_files = []
     try:
-        # Extract dashboard UID
         dashboard_uid = extract_uid_from_url(dashboard_url)
-
-        # Fetch original dashboard title
-        url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
-        r = requests.get(url, headers=headers)
-        r.raise_for_status()
-        original_dashboard = r.json()["dashboard"]
-        original_title = original_dashboard.get("title", "Grafana Dashboard")
-
-        # Step 1: Clone dashboard without excluded panels
         temp_uid = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
 
-        # Step 2: Render full dashboard image in kiosk mode
-        render_url = (
-            f"{GRAFANA_URL}/render/d/{temp_uid}"
-            f"?kiosk&width={A4_WIDTH_PX}&height=10000"
-            f"&theme=light&tz=UTC&from={TIME_FROM}&to={TIME_TO}"
-        )
+        render_url = f"{GRAFANA_URL}/render/d/{temp_uid}?kiosk&width={A4_WIDTH_PX}&height=10000&theme=light&tz=UTC&from={TIME_FROM}&to={TIME_TO}"
         logger.info(f"Rendering dashboard at {render_url}")
         r = requests.get(render_url, headers=headers, stream=True, timeout=60)
         r.raise_for_status()
         img = Image.open(io.BytesIO(r.content))
 
-        # Step 3: Paginate image to A4 pages
         pages = paginate_to_a4(img)
         logger.info(f"Dashboard paginated into {len(pages)} pages")
 
-        # Step 4: Generate PDF from pages
         pdf_path = f"/tmp/grafana_report_{temp_uid}.pdf"
         generate_pdf_from_pages(pages, pdf_path)
 
-        # Step 5: Download table CSVs using Playwright
+        csv_files = []
         if email_to:
-            try:
-                csv_files = download_table_csvs(
-                    f"{GRAFANA_URL}/d/{temp_uid}",
-                    output_dir="/tmp/grafana_csvs",
-                    api_key=GRAFANA_API_KEY
-                )
-                logger.info(f"Downloaded {len(csv_files)} table CSVs")
-            except Exception as e:
-                logger.error(f"Failed to download table CSVs: {e}")
+            csv_files = download_table_csvs(temp_uid)
 
-        # Step 6: Send email if requested
         if email_to:
-            msg = EmailMessage()
-            msg["Subject"] = f"Grafana Report - {original_title} - {datetime.now().strftime('%Y-%m-%d')}"
-            msg["From"] = EMAIL_FROM
-            msg["To"] = email_to
-
-            # Attach PDF
+            send_email_msg = EmailMessage()
+            send_email_msg["Subject"] = f"Grafana Report - {temp_uid} - {datetime.now().strftime('%Y-%m-%d')}"
+            send_email_msg["From"] = EMAIL_FROM
+            send_email_msg["To"] = email_to
             with open(pdf_path, "rb") as f:
-                msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{original_title}.pdf")
-
-            # Attach CSVs
+                send_email_msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{temp_uid}.pdf")
             for csv_file in csv_files:
                 with open(csv_file, "rb") as f:
-                    filename = os.path.basename(csv_file)
-                    msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=filename)
-
-            try:
-                with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-                    server.starttls()
-                    if SMTP_USERNAME and SMTP_PASSWORD:
-                        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                    server.send_message(msg)
-                logger.info(f"Email sent to {email_to}")
-            except Exception as e:
-                logger.error(f"Failed to send email: {e}")
+                    send_email_msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=os.path.basename(csv_file))
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.starttls()
+                if SMTP_USERNAME and SMTP_PASSWORD:
+                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(send_email_msg)
+            logger.info(f"Email sent to {email_to}")
 
         logger.info(f"Report generation completed: PDF + {len(csv_files)} CSVs")
-
     except Exception as e:
         logger.error(f"Error during report generation: {e}")
-
     finally:
         if temp_uid:
             delete_dashboard(temp_uid)
-
 
 @app.post("/generate_report/")
 async def generate_report(req: ReportRequest, background_tasks: BackgroundTasks):
