@@ -3,12 +3,11 @@ set -e
 
 echo "Installing Python dependencies..."
 pip install --user --no-cache-dir -q -r /app/repo/requirements.txt
-playwright install
 echo "Dependencies installed."
 
 # Ensure local pip bin is in PATH
 export PATH="$HOME/.local/bin:$PATH"
-
+playwright install
 echo "Starting server..."
 cd /app/repo
 
