@@ -37,6 +37,7 @@ GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
 GRAFANA_API_KEY = os.getenv("GRAFANA_API_KEY")
 TIME_FROM = os.getenv("TIME_FROM", "now-6h")
 TIME_TO = os.getenv("TIME_TO", "now")
+TIME_TO_CSV = os.getenv("TIME_TO_CSV", "now")
 EMAIL_FROM = os.getenv("EMAIL_FROM")
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -245,7 +246,7 @@ def resolve_grafana_vars(query: str, variables: dict) -> str:
         value = re.sub(r"[\[\]']+", "", str(value))
         query = query.replace(f"${var}", value)
     # Always replace $__range with your computed Prometheus range
-    query = query.replace("$__range", compute_range_duration(TIME_FROM, TIME_TO))
+    query = query.replace("$__range", compute_range_duration(TIME_FROM, TIME_TO_CSV))
     return query
 
 def query_prometheus(expr: str):
