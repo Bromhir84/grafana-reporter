@@ -217,10 +217,8 @@ def send_email(dashboard_title, pdf_path, email_to):
         raise
 
 def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=None):
-    """
-    Downloads table panel CSVs from Grafana using Playwright.
-    Handles dynamic titles, panel menus, and transformations.
-    """
+    import os
+    from playwright.sync_api import sync_playwright
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
 
@@ -234,25 +232,27 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
         page.goto(dashboard_url)
         page.wait_for_timeout(8000)  # wait for dashboard to render
 
-        panel_elements = page.query_selector_all("div.panel-content")
-
-        for idx, panel in enumerate(panel_elements, start=1):
+        panels = page.query_selector_all("div.panel-content")
+        for idx, panel in enumerate(panels, start=1):
             try:
                 panel.hover()
-                # Open panel menu
-                menu_button = panel.query_selector('button[aria-label="More options"]')
-                if not menu_button:
+                # Open More options menu
+                menu_btn = panel.query_selector('button[aria-label="More options"]')
+                if not menu_btn:
                     continue
-                menu_button.click()
+                menu_btn.click()
+
+                # Click Inspect → Data
                 page.locator("text=Inspect").click()
                 page.locator("text=Data").click()
 
-                # Wait and locate Download CSV button
-                page.wait_for_selector('button:has-text("Download CSV")', timeout=5000)
+                # Wait for CSV button to appear
+                page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
                 csv_button = page.locator('button:has-text("Download CSV")')
                 if csv_button.count() == 0:
                     continue
 
+                # Intercept download
                 with page.expect_download() as download_info:
                     csv_button.click()
                 download = download_info.value
@@ -267,7 +267,7 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                 csv_files.append(csv_path)
                 logger.info(f"Downloaded CSV for panel '{panel_title}' → {csv_path}")
 
-                # Back to dashboard
+                # Go back to dashboard for next panel
                 page.goto(dashboard_url)
                 page.wait_for_timeout(2000)
 
