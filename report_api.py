@@ -113,10 +113,10 @@ def parse_grafana_time(time_str: str) -> datetime:
 
     return dt
 
-def compute_range_from_env(time_from: str, time_to_csv: str):
+def compute_range_from_env(time_from: str, time_to: str):
     """Return start and end datetime based on TIME_FROM and TIME_TO."""
     start = parse_grafana_time(time_from)
-    end = parse_grafana_time(time_to_csv)
+    end = parse_grafana_time(time_to)
     return start, end
 
 def compute_prometheus_duration(start: datetime, end: datetime) -> str:
@@ -328,7 +328,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         temp_uid, table_panels, GRAFANA_VARS = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
 
         # Step 2: Build CSVs for table panels
-        start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO)
+        start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
         logger.info(f"Querying Prometheus from {start_dt} to {end_dt}")
 
         for panel in table_panels:
@@ -336,7 +336,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             combined_df = None
 
             # Compute start/end from env
-            start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO)
+            start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
 
             for expr in panel["queries"]:
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
