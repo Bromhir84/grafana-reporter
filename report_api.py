@@ -338,7 +338,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         pdf_path = f"/tmp/grafana_report_{temp_uid}.pdf"
         generate_pdf_from_pages(pages, pdf_path)
 
-        # Step 5: Download table CSVs using headless browser
+        # Step 5: Download table CSVs using Playwright
         if email_to:
             try:
                 csv_files = download_table_csvs(
