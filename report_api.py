@@ -266,18 +266,23 @@ def extract_grafana_vars(dashboard_json):
         vars_dict[v["name"]] = str(value)
     return vars_dict
 
-def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime) -> str:
-    """Replace Grafana template variables with provided values, including $__range."""
-    for var, value in variables.items():
-        if not value or value == "$__all":
-            value = ".*"  # regex that matches everything
-        # Replace both $var and ${var}
-        query = query.replace(f"${var}", value)
-        query = query.replace(f"${{{var}}}", value)
+def normalize_grafana_var(value):
+    """Convert Grafana variable value into a Prometheus-compatible regex."""
+    if not value or value == "$__all":
+        return ".*"
+    # If it looks like a list ['a','b'], convert to a|b
+    if isinstance(value, str) and value.startswith("[") and value.endswith("]"):
+        items = re.findall(r"'([^']+)'", value)
+        return "|".join(items) if items else ".*"
+    return value
 
-    # Replace $__range with the correct duration
+def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime) -> str:
+    """Replace Grafana template variables with Prometheus-compatible values."""
+    for var, value in variables.items():
+        safe_value = normalize_grafana_var(value)
+        query = query.replace(f"${var}", safe_value)
+        query = query.replace(f"${{{var}}}", safe_value)
     query = query.replace("$__range", compute_prometheus_duration(start, end))
-    
     return query
 
 def query_prometheus(expr: str):
