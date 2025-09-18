@@ -209,7 +209,6 @@ def list_dashboard_panels(dashboard_url, api_key=None):
     Returns a list of panel titles.
     """
     from playwright.sync_api import sync_playwright
-    import os
 
     logger.info(f"Opening original dashboard: {dashboard_url}")
 
@@ -224,26 +223,31 @@ def list_dashboard_panels(dashboard_url, api_key=None):
         page.wait_for_timeout(8000)  # Wait for dashboard to fully render
         logger.info("Dashboard loaded")
 
-        # Try multiple selectors to catch panel titles
-        panel_headers = page.query_selector_all("h2, .css-1fxx2s4")  # Add other class names if needed
-        found_titles = []
-        for ph in panel_headers:
+        # Attempt to locate all panel titles robustly
+        panel_titles = set()
+        for panel_div in page.query_selector_all("div[role='region'], div[data-panelid]"):
             try:
-                title = ph.inner_text().strip()
-                if title:
-                    found_titles.append(title)
+                # Try h2 inside panel
+                h2 = panel_div.query_selector("h2")
+                if h2:
+                    panel_titles.add(h2.inner_text().strip())
+                else:
+                    # Fallback: look for any child with text content
+                    text = panel_div.inner_text().strip()
+                    if text:
+                        panel_titles.add(text.split("\n")[0])  # take first line
             except Exception:
                 continue
 
-        if found_titles:
-            logger.info(f"Panels found on original dashboard:")
-            for t in found_titles:
+        if panel_titles:
+            logger.info("Panels found on original dashboard:")
+            for t in panel_titles:
                 logger.info(f" - {t}")
         else:
             logger.warning("No panels found on the original dashboard.")
 
         browser.close()
-        return found_titles
+        return list(panel_titles)
     
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
