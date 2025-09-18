@@ -314,6 +314,7 @@ def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
             return None
 
         # Step 4: Build payload
+        logger.debug(f"Panel '{panel_title}' datasource: {datasource}, type: {panel_type}, targets: {queries}")
         payload = {
             "from": TIME_FROM,
             "to": TIME_TO,
