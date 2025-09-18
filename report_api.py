@@ -221,33 +221,101 @@ def generate_pdf_from_pages(pages, output_path):
     logger.info(f"PDF saved to {output_path}")
 
 def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
-    """Fetch CSV for a single table panel with retry if 404 occurs."""
+    """
+    Fetch CSV for a single table panel using Grafana's /api/ds/query endpoint.
+    """
     panel_id = panel.get("id")
     panel_title = panel.get("title", f"Panel-{panel_id}")
     panel_type = panel.get("type")
 
+    # Only process table panels
     if panel_type != "table":
         return None
 
-    url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}/panels/{panel_id}/data"
-    params = {"format": "csv", "from": TIME_FROM, "to": TIME_TO}
+    try:
+        # Step 1: Fetch dashboard definition (to get datasource + queries)
+        url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        dashboard = resp.json()["dashboard"]
 
-    for attempt in range(1, retries + 1):
-        try:
-            r = requests.get(url, headers=headers, params=params, timeout=30)
-            r.raise_for_status()
-            logger.info(f"Fetched CSV for panel '{panel_title}'")
-            return r.text
-        except requests.HTTPError as e:
-            if r.status_code == 404 and attempt < retries:
-                logger.warning(f"CSV not ready for panel '{panel_title}', retrying in {delay}s...")
-                time.sleep(delay)
-            else:
-                logger.error(f"Failed to fetch CSV for panel '{panel_title}': {e}")
-                return None
-        except Exception as e:
-            logger.error(f"Failed to fetch CSV for panel '{panel_title}': {e}")
+        # Locate this panel's full config
+        panel_def = next((p for p in dashboard.get("panels", []) if p.get("id") == panel_id), None)
+        if not panel_def:
+            logger.error(f"Panel {panel_id} not found in dashboard {dashboard_uid}")
             return None
+
+        datasource = panel_def.get("datasource")
+        queries = panel_def.get("targets", [])
+        if not queries:
+            logger.warning(f"No queries found for panel '{panel_title}'")
+            return None
+
+        # Step 2: Build payload for /api/ds/query
+        payload = {
+            "from": TIME_FROM,
+            "to": TIME_TO,
+            "queries": [
+                {
+                    "datasource": datasource,
+                    "refId": q.get("refId", "A"),
+                    "intervalMs": 60000,
+                    "maxDataPoints": 500,
+                    **q
+                } for q in queries
+            ]
+        }
+
+        query_url = f"{GRAFANA_URL}/api/ds/query"
+
+        # Step 3: Retry loop
+        for attempt in range(1, retries + 1):
+            try:
+                r = requests.post(query_url, headers=headers, json=payload, timeout=60)
+                r.raise_for_status()
+                data = r.json()
+                logger.info(f"Fetched data for panel '{panel_title}'")
+
+                # Step 4: Convert JSON results to CSV
+                results = data.get("results", {})
+                rows = []
+                header = ["Panel Title"]
+
+                for _, result in results.items():
+                    frames = result.get("frames", [])
+                    for frame in frames:
+                        schema = frame.get("schema", {})
+                        fields = schema.get("fields", [])
+                        names = [f["name"] for f in fields]
+                        if len(header) == 1:  # only once
+                            header.extend(names)
+                        values = frame.get("data", {}).get("values", [])
+                        # transpose columns -> rows
+                        for row in zip(*values):
+                            rows.append([panel_title] + list(row))
+
+                # Convert to CSV string
+                if not rows:
+                    logger.warning(f"No rows found for panel '{panel_title}'")
+                    return None
+
+                buf = io.StringIO()
+                writer = csv.writer(buf)
+                writer.writerow(header)
+                writer.writerows(rows)
+                return buf.getvalue()
+
+            except requests.HTTPError as e:
+                if r.status_code == 404 and attempt < retries:
+                    logger.warning(f"Data not ready for panel '{panel_title}', retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Failed to fetch data for panel '{panel_title}': {e}")
+                    return None
+
+    except Exception as e:
+        logger.error(f"Error fetching CSV for panel '{panel_title}': {e}")
+        return None
 
 def generate_csv_from_table_panels(panels, dashboard_uid, output_path):
     """Combine all table panel CSVs into a single CSV file."""
