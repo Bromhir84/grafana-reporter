@@ -217,13 +217,8 @@ def send_email(dashboard_title, pdf_path, email_to):
         raise
 
 def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=None):
-    """
-    Downloads table panels from a Grafana dashboard by opening Inspect → Data.
-    Handles panels inside iframes and waits for CSV button to appear.
-    """
     import os
     from playwright.sync_api import sync_playwright
-
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
 
@@ -237,77 +232,72 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
 
         page = context.new_page()
         page.goto(dashboard_url)
-        logger.info("Dashboard page opened, waiting for panels to load...")
-        page.wait_for_timeout(10000)  # wait 10s for panels to render
+        page.wait_for_timeout(8000)  # wait for dashboard to render
+        logger.info("Dashboard loaded, looking for panels...")
 
-        # Find all iframes (Grafana often uses iframes for panels)
-        iframe_elements = page.query_selector_all("iframe")
-        logger.info(f"Found {len(iframe_elements)} iframe(s)")
+        panels = page.query_selector_all("div.panel-content")
+        logger.info(f"Found {len(panels)} panels")
 
-        for fidx, iframe in enumerate(iframe_elements, start=1):
-            frame = iframe.content_frame()
-            if not frame:
-                logger.warning(f"Iframe {fidx} has no content frame")
-                continue
+        for idx, panel in enumerate(panels, start=1):
+            try:
+                panel_title_elem = panel.query_selector("div.panel-title-text")
+                panel_title = panel_title_elem.inner_text().strip() if panel_title_elem else f"panel_{idx}"
+                logger.info(f"Processing panel {idx}: '{panel_title}'")
 
-            panel_elements = frame.query_selector_all("div.panel-content")
-            logger.info(f"Iframe {fidx}: Found {len(panel_elements)} panel(s)")
+                panel.hover()
+                menu_btn = panel.query_selector('button[aria-label="More options"]')
+                if not menu_btn:
+                    logger.warning(f"Panel '{panel_title}': No menu button found, skipping CSV export")
+                    continue
+                logger.info(f"Panel '{panel_title}': Menu button found")
+                menu_btn.click()
+                logger.info(f"Panel '{panel_title}': Clicked 'More options'")
 
-            for idx, panel in enumerate(panel_elements, start=1):
+                # Click Inspect → Data
+                inspect_btn = page.locator("text=Inspect")
+                if inspect_btn.count() == 0:
+                    logger.warning(f"Panel '{panel_title}': 'Inspect' button not found")
+                    continue
+                inspect_btn.click()
+                logger.info(f"Panel '{panel_title}': Clicked 'Inspect'")
+
+                data_btn = page.locator("text=Data")
+                if data_btn.count() == 0:
+                    logger.warning(f"Panel '{panel_title}': 'Data' button not found")
+                    continue
+                data_btn.click()
+                logger.info(f"Panel '{panel_title}': Clicked 'Data'")
+
+                # Wait for CSV button
                 try:
-                    panel_title_elem = panel.query_selector("div.panel-title-text")
-                    panel_title = panel_title_elem.inner_text().strip() if panel_title_elem else f"iframe{fidx}_panel{idx}"
-                    logger.info(f"Processing panel {idx} in iframe {fidx}: '{panel_title}'")
-
-                    panel.hover()
-                    menu_btn = panel.query_selector('button[aria-label="More options"]')
-                    if not menu_btn:
-                        logger.warning(f"Panel '{panel_title}': No menu button found, skipping CSV")
+                    page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
+                    csv_button = page.locator('button:has-text("Download CSV")')
+                    if csv_button.count() == 0:
+                        logger.warning(f"Panel '{panel_title}': 'Download CSV' button not found")
                         continue
-                    menu_btn.click()
-                    logger.info(f"Panel '{panel_title}': Clicked 'More options'")
 
-                    # Click Inspect → Data
-                    inspect_btn = frame.locator("text=Inspect")
-                    if inspect_btn.count() == 0:
-                        logger.warning(f"Panel '{panel_title}': 'Inspect' button not found")
-                        continue
-                    inspect_btn.click()
-                    logger.info(f"Panel '{panel_title}': Clicked 'Inspect'")
+                    with page.expect_download() as download_info:
+                        csv_button.click()
+                    download = download_info.value
 
-                    data_btn = frame.locator("text=Data")
-                    if data_btn.count() == 0:
-                        logger.warning(f"Panel '{panel_title}': 'Data' button not found")
-                        continue
-                    data_btn.click()
-                    logger.info(f"Panel '{panel_title}': Clicked 'Data'")
-
-                    # Wait for CSV button
-                    try:
-                        frame.wait_for_selector('button:has-text("Download CSV")', timeout=15000)
-                        csv_button = frame.locator('button:has-text("Download CSV")')
-                        if csv_button.count() == 0:
-                            logger.warning(f"Panel '{panel_title}': 'Download CSV' button not found")
-                            continue
-
-                        with frame.expect_download() as download_info:
-                            csv_button.click()
-                        download = download_info.value
-
-                        safe_title = panel_title.replace(" ", "_").replace("$", "").replace("/", "_")
-                        csv_path = os.path.join(output_dir, f"{safe_title}.csv")
-                        download.save_as(csv_path)
-                        csv_files.append(csv_path)
-                        logger.info(f"Downloaded CSV for panel '{panel_title}' → {csv_path}")
-
-                    except Exception as e:
-                        logger.error(f"Panel '{panel_title}': Error waiting for or clicking 'Download CSV': {e}")
+                    safe_title = panel_title.replace(" ", "_").replace("$", "").replace("/", "_")
+                    csv_path = os.path.join(output_dir, f"{safe_title}.csv")
+                    download.save_as(csv_path)
+                    csv_files.append(csv_path)
+                    logger.info(f"Downloaded CSV for panel '{panel_title}' → {csv_path}")
 
                 except Exception as e:
-                    logger.error(f"Unexpected error processing panel {idx} in iframe {fidx}: {e}")
+                    logger.error(f"Panel '{panel_title}': Error waiting for or clicking 'Download CSV': {e}")
+
+                # Go back to dashboard before next panel
+                page.goto(dashboard_url)
+                page.wait_for_timeout(2000)
+
+            except Exception as e:
+                logger.error(f"Unexpected error processing panel {idx}: {e}")
 
         browser.close()
-    logger.info(f"CSV export finished, downloaded {len(csv_files)} file(s)")
+    logger.info(f"CSV export finished, downloaded {len(csv_files)} files")
     return csv_files
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
