@@ -271,7 +271,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
         # Step 3: Download CSV only for the "Total consumption" panel
         if email_to:
-            list_dashboard_panels(f"{GRAFANA_URL}/d/{temp_uid}", api_key=GRAFANA_API_KEY)
+            list_dashboard_panels(f"{GRAFANA_URL}/d/{dashboard_uid}", api_key=GRAFANA_API_KEY)
             # try:
             #     csv_files = download_specific_table_csv(
             #         dashboard_url=f"{GRAFANA_URL}/d/{temp_uid}",
