@@ -138,6 +138,10 @@ def download_specific_table_csv(dashboard_url, panel_name="Total consumption", o
         page.wait_for_timeout(8000)  # wait for dashboard to render
         logger.info("Dashboard loaded")
 
+        panel_headers = page.query_selector_all("h2")
+        found_titles = [ph.inner_text().strip() for ph in panel_headers]
+        logger.info(f"Panels found on dashboard: {found_titles}")
+
         # Locate the panel by its title
         panel_selector = f"//h2[text()='{panel_name}']/ancestor::div[contains(@class,'panel-container')]"
         target_panel = page.query_selector(panel_selector)
