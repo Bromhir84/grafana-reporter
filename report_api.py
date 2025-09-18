@@ -340,6 +340,8 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
             for expr in panel["queries"]:
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
+                logger.info(f"Querying Prometheus for panel '{panel['title']}':\n{expr_resolved}\nStart: {start_dt}, End: {end_dt}")
+
                 try:
                     results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt)
                 except Exception as e:
