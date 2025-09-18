@@ -98,6 +98,7 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None):
     r.raise_for_status()
 
     dash = r.json()["dashboard"]
+    GRAFANA_VARS = extract_grafana_vars(dash)
 
     table_panels = []
     for panel in dash.get("panels", []):
@@ -118,7 +119,7 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None):
     r = requests.post(put_url, headers=headers, json=payload)
     r.raise_for_status()
 
-    return temp_uid, table_panels
+    return temp_uid, table_panels, GRAFANA_VARS
 
 def delete_dashboard(uid):
     url = f"{GRAFANA_URL}/api/dashboards/uid/{uid}"
@@ -191,6 +192,14 @@ def list_dashboard_panels(dashboard_url, api_key=None):
 
         browser.close()
         return list(panel_titles)
+
+def extract_grafana_vars(dashboard_json):
+    vars_dict = {}
+    for v in dashboard_json.get("templating", {}).get("list", []):
+        # Use the current value if set, otherwise match everything
+        value = v.get("current", {}).get("value", ".*")
+        vars_dict[v["name"]] = str(value)
+    return vars_dict
 
 def resolve_grafana_vars(query: str, variables: dict) -> str:
     """Replace Grafana-style template variables with provided values."""
