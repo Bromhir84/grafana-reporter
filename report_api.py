@@ -113,10 +113,10 @@ def parse_grafana_time(time_str: str) -> datetime:
 
     return dt
 
-def compute_range_from_env(time_from: str, time_to: str):
+def compute_range_from_env(time_from: str, time_to_csv: str):
     """Return start and end datetime based on TIME_FROM and TIME_TO."""
     start = parse_grafana_time(time_from)
-    end = parse_grafana_time(time_to)
+    end = parse_grafana_time(time_to_csv)
     return start, end
 
 def compute_prometheus_duration(start: datetime, end: datetime) -> str:
