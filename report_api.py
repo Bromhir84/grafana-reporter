@@ -220,6 +220,32 @@ def generate_pdf_from_pages(pages, output_path):
         f.write(img2pdf.convert(pages))
     logger.info(f"PDF saved to {output_path}")
 
+def resolve_datasource(datasource):
+    """
+    Given a panel.datasource (string name, string uid, or dict),
+    fetch the correct uid and type from Grafana.
+    """
+    if isinstance(datasource, dict):
+        return datasource.get("uid"), datasource.get("type")
+
+    if isinstance(datasource, str):
+        # Try by UID first
+        resp = requests.get(f"{GRAFANA_URL}/api/datasources/uid/{datasource}", headers=headers, timeout=30)
+        if resp.status_code == 200:
+            ds_info = resp.json()
+            return ds_info["uid"], ds_info["type"]
+
+        # Try by NAME
+        resp = requests.get(f"{GRAFANA_URL}/api/datasources/name/{datasource}", headers=headers, timeout=30)
+        if resp.status_code == 200:
+            ds_info = resp.json()
+            return ds_info["uid"], ds_info["type"]
+
+        logger.error(f"Datasource '{datasource}' not found in Grafana")
+        return None, None
+
+    return None, None
+    
 def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
     """
     Fetch CSV for a single table panel using Grafana's /api/ds/query endpoint.
@@ -268,10 +294,7 @@ def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
             "queries": [
                 {
                     "refId": q.get("refId", "A"),
-                    "datasource": {
-                        "uid": datasource.get("uid") if isinstance(datasource, dict) else datasource,
-                        "type": datasource.get("type", "prometheus") if isinstance(datasource, dict) else "prometheus"
-                    },
+                    "datasource": {"uid": ds_uid, "type": ds_type},
                     "intervalMs": 60000,
                     "maxDataPoints": 500,
                     **q
