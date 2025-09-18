@@ -8,7 +8,8 @@ import csv
 import time
 import img2pdf
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
+from dateutil import parser
 from email.message import EmailMessage
 import smtplib
 import pandas as pd
@@ -18,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 from playwright.sync_api import sync_playwright
+
 
 app = FastAPI(root_path=os.getenv("ROOT_PATH", "/report"))
 
@@ -61,6 +63,26 @@ class ReportRequest(BaseModel):
     dashboard_url: str
     email_report: bool = False
     email_to: str = None
+
+def compute_range_duration(time_from: str, time_to: str) -> str:
+    """Convert Grafana-like TIME_FROM/TIME_TO to Prometheus duration string (e.g., '6h')."""
+    def parse_time(t):
+        if t.startswith("now-"):
+            # now-6h, now-30m, etc.
+            amount = re.findall(r"\d+", t)[0]
+            unit = re.findall(r"[smhdw]", t)[0]  # seconds, minutes, hours, days, weeks
+            return timedelta(**{"s":0, "m":0, "h":0, "d":0, "w":0, "s": int(amount)} | {unit: int(amount)})
+        elif t == "now":
+            return datetime.utcnow()
+        else:
+            return parser.parse(t)
+
+    # Simple approach: if it's a relative time like now-6h, just extract hours
+    match = re.match(r"now-(\d+)([smhdw])", time_from)
+    if match:
+        value, unit = match.groups()
+        return f"{value}{unit}"
+    return "6h"  # fallback default
 
 def extract_uid_from_url(url: str) -> str:
     match = re.search(r"/d/([^/]+)/", url)
@@ -203,12 +225,13 @@ def extract_grafana_vars(dashboard_json):
 
 def resolve_grafana_vars(query: str, variables: dict) -> str:
     for var, value in variables.items():
-        # Convert lists or $__all to match-all regex
         if not value or value in ("$__all", "['$__all']"):
             value = ".*"
-        # Remove brackets/quotes if accidentally included
-        value = re.sub(r"[\[\]']+", "", value)
+        # Clean brackets/quotes
+        value = re.sub(r"[\[\]']+", "", str(value))
         query = query.replace(f"${var}", value)
+    # Always replace $__range with your computed Prometheus range
+    query = query.replace("$__range", compute_range_duration(TIME_FROM, TIME_TO))
     return query
 
 def query_prometheus(expr: str):
