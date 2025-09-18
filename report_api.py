@@ -66,38 +66,46 @@ class ReportRequest(BaseModel):
     email_to: str = None
 
 def compute_range_duration(time_from: str, time_to: str) -> str:
-    """Convert Grafana time range macros (now-1M/M) to Prometheus duration string."""
+    """Compute Prometheus-compatible duration string from Grafana-style TIME_FROM/TIME_TO."""
     
-    def parse_macro(t):
-        t = t.lower()
-        if t.startswith("now-") and "/m" in t:
-            # e.g., now-1M/M
-            months_back = int(re.search(r"now-(\d+)m", t).group(1))
-            now = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            start = (now.replace(day=1) - relativedelta(months=months_back))
-            return start
-        elif t.startswith("now-"):
-            # now-6h, now-30m, etc.
-            match = re.match(r"now-(\d+)([smhdw])", t)
-            if match:
-                value, unit = match.groups()
-                multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-                return datetime.utcnow() - timedelta(seconds=int(value)*multipliers[unit])
-        elif t == "now":
+    def parse_grafana_time(t: str) -> datetime:
+        t = t.strip()
+        if t == "now":
             return datetime.utcnow()
-        else:
-            return datetime.fromisoformat(t)
+        # Handle month rounding e.g., now-1M/M
+        m = re.match(r"now-(\d+)M/M", t)
+        if m:
+            months_back = int(m.group(1))
+            dt = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            dt -= relativedelta.relativedelta(months=months_back)
+            return dt
+        # Handle now/M (start of current month)
+        if t == "now/M":
+            dt = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            return dt
+        # Fallback: relative hours/days like now-6h
+        m = re.match(r"now-(\d+)([smhdw])", t)
+        if m:
+            value, unit = m.groups()
+            kwargs = {"s": 0, "m": 0, "h": 0, "d": 0, "w": 0}
+            kwargs[{"s":"s","m":"m","h":"h","d":"d","w":"w"}[unit]] = int(value)
+            return datetime.utcnow() - timedelta(**kwargs)
+        # Try parsing absolute time
+        return parser.parse(t)
 
-    start = parse_macro(time_from)
-    end = parse_macro(time_to)
+    start = parse_grafana_time(time_from)
+    end = parse_grafana_time(time_to)
+    delta = end - start
 
-    delta_seconds = int((end - start).total_seconds())
-    if delta_seconds % 3600 == 0:
-        return f"{delta_seconds // 3600}h"
-    elif delta_seconds % 60 == 0:
-        return f"{delta_seconds // 60}m"
+    # Convert timedelta to Prometheus duration
+    if delta.days > 0:
+        return f"{delta.days}d"
+    elif delta.seconds >= 3600:
+        return f"{delta.seconds // 3600}h"
+    elif delta.seconds >= 60:
+        return f"{delta.seconds // 60}m"
     else:
-        return f"{delta_seconds}s"
+        return f"{delta.seconds}s"
 
 def extract_uid_from_url(url: str) -> str:
     match = re.search(r"/d/([^/]+)/", url)
