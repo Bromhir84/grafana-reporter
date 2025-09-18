@@ -118,55 +118,70 @@ def generate_pdf_from_pages(pages, output_path):
         f.write(img2pdf.convert(pages))
     logger.info(f"PDF saved to {output_path}")
 
-def download_table_csvs(dashboard_uid, output_dir="/tmp/grafana_csvs"):
+def download_specific_table_csv(dashboard_url, panel_name="Total consumption", output_dir="/tmp/grafana_csvs", api_key=None):
+    import os
+    from playwright.sync_api import sync_playwright
+
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
-    dashboard_url = f"{GRAFANA_URL}/d/{dashboard_uid}"
 
-    logger.info(f"Opening temporary dashboard for CSV export: {dashboard_url}")
+    logger.info(f"Opening dashboard for CSV export: {dashboard_url}")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(extra_http_headers={"Authorization": f"Bearer {GRAFANA_API_KEY}"})
+        context = browser.new_context(extra_http_headers={
+            "Authorization": f"Bearer {api_key}"
+        } if api_key else {})
+
         page = context.new_page()
         page.goto(dashboard_url)
-        page.wait_for_timeout(8000)
+        page.wait_for_timeout(8000)  # wait for dashboard to render
+        logger.info("Dashboard loaded")
 
-        panels = page.query_selector_all("div[role='region'][aria-label*='panel']")
-        logger.info(f"Found {len(panels)} panels")
+        # Locate the panel by its title
+        panel_selector = f"//h2[text()='{panel_name}']/ancestor::div[contains(@class,'panel-container')]"
+        target_panel = page.query_selector(panel_selector)
 
-        for idx, panel in enumerate(panels, start=1):
-            try:
-                panel_header = panel.evaluate_handle("el => el.closest('section').querySelector('h2')")
-                panel_title = panel_header.inner_text().strip() if panel_header else f"panel_{idx}"
-                safe_title = panel_title.replace(" ", "_").replace("/", "_").replace("$", "")
-                logger.info(f"Processing panel '{panel_title}'")
+        if not target_panel:
+            logger.warning(f"Panel with title '{panel_name}' not found")
+            return []
 
-                panel.hover()
-                menu_btn = panel.query_selector('button[aria-label^="Menu for panel"]')
-                if not menu_btn:
-                    logger.warning(f"Panel '{panel_title}': No menu button found, skipping CSV")
-                    continue
-                menu_btn.click()
-                page.locator("text=Inspect").click()
-                page.locator("text=Data").click()
+        logger.info(f"Found panel '{panel_name}'")
 
-                page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
-                with page.expect_download() as download_info:
-                    page.locator('button:has-text("Download CSV")').click()
-                download = download_info.value
-                csv_path = os.path.join(output_dir, f"{safe_title}.csv")
-                download.save_as(csv_path)
-                csv_files.append(csv_path)
-                logger.info(f"Downloaded CSV → {csv_path}")
-                page.goto(dashboard_url)
-                page.wait_for_timeout(2000)
+        try:
+            # Click the triple-dot menu (More options)
+            menu_btn = target_panel.query_selector('button[aria-label^="Panel menu"], button[aria-label*="More"]')
+            if not menu_btn:
+                logger.warning(f"Panel '{panel_name}': Menu button not found")
+                return []
+            menu_btn.click()
+            logger.info(f"Clicked panel menu for '{panel_name}'")
 
-            except Exception as e:
-                logger.error(f"Error processing panel {idx}: {e}")
+            # Click Inspect → Data
+            page.locator("text=Inspect").click()
+            page.locator("text=Data").click()
+            logger.info(f"Clicked 'Inspect → Data' for '{panel_name}'")
+
+            # Wait for CSV button and download
+            page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
+            with page.expect_download() as download_info:
+                page.locator('button:has-text("Download CSV")').click()
+            download = download_info.value
+
+            safe_title = panel_name.replace(" ", "_").replace("/", "_").replace("$", "")
+            csv_path = os.path.join(output_dir, f"{safe_title}.csv")
+            download.save_as(csv_path)
+            csv_files.append(csv_path)
+            logger.info(f"Downloaded CSV → {csv_path}")
+
+        except Exception as e:
+            logger.error(f"Error downloading CSV for panel '{panel_name}': {e}")
 
         browser.close()
+
     logger.info(f"CSV export finished, downloaded {len(csv_files)} files")
     return csv_files
+
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
