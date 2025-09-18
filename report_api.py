@@ -27,6 +27,7 @@ app.add_middleware(
 )
 
 # Environment variables
+PROMETHEUS_URL = os.getenv("http://your-prometheus-server:9090")
 GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
 GRAFANA_API_KEY = os.getenv("GRAFANA_API_KEY")
 TIME_FROM = os.getenv("TIME_FROM", "now-6h")
@@ -74,12 +75,27 @@ def filter_panels(panels, excluded_titles_lower):
             filtered.append(panel)
     return filtered
 
+def extract_table_panels(dashboard_data):
+    """Return list of (title, queries) for all table panels in a dashboard."""
+    tables = []
+    def walk_panels(panels):
+        for panel in panels:
+            if panel.get("type") == "table":
+                queries = [t["expr"] for t in panel.get("targets", []) if "expr" in t]
+                tables.append({"title": panel.get("title", "Untitled Table"), "queries": queries})
+            if "panels" in panel:  # nested rows
+                walk_panels(panel["panels"])
+    walk_panels(dashboard_data.get("panels", []))
+    return tables
+
 def clone_dashboard_without_panels(original_uid, excluded_titles):
     logger.info(f"Fetching dashboard UID: {original_uid}")
     url = f"{GRAFANA_URL}/api/dashboards/uid/{original_uid}"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
     dashboard_data = r.json()["dashboard"]
+
+    all_panels = dashboard_data.get("panels", [])
 
     # Log all panel titles before filtering
     all_panels = dashboard_data.get("panels", [])
@@ -107,7 +123,11 @@ def clone_dashboard_without_panels(original_uid, excluded_titles):
     r = requests.post(save_url, headers=headers, json=payload)
     r.raise_for_status()
     logger.info(f"Temporary dashboard created: {dashboard_data['uid']}")
-    return dashboard_data["uid"]
+    
+    # Collect table panels from the ORIGINAL (unfiltered) dashboard
+    table_panels = extract_table_panels(r.json()["dashboard"])
+
+    return dashboard_data["uid"], table_panels
 
 def delete_dashboard(uid):
     url = f"{GRAFANA_URL}/api/dashboards/uid/{uid}"
@@ -134,74 +154,6 @@ def generate_pdf_from_pages(pages, output_path):
     with open(output_path, "wb") as f:
         f.write(img2pdf.convert(pages))
     logger.info(f"PDF saved to {output_path}")
-
-def download_specific_table_csv(dashboard_url, panel_name="Total consumption", output_dir="/tmp/grafana_csvs", api_key=None):
-    import os
-    from playwright.sync_api import sync_playwright
-
-    os.makedirs(output_dir, exist_ok=True)
-    csv_files = []
-
-    logger.info(f"Opening dashboard for CSV export: {dashboard_url}")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(extra_http_headers={
-            "Authorization": f"Bearer {api_key}"
-        } if api_key else {})
-
-        page = context.new_page()
-        page.goto(dashboard_url)
-        page.wait_for_timeout(8000)  # wait for dashboard to render
-        logger.info("Dashboard loaded")
-
-        panel_headers = page.query_selector_all("h2")
-        found_titles = [ph.inner_text().strip() for ph in panel_headers]
-        logger.info(f"Panels found on dashboard: {found_titles}")
-
-        # Locate the panel by its title
-        panel_selector = f"//h2[text()='{panel_name}']/ancestor::div[contains(@class,'panel-container')]"
-        target_panel = page.query_selector(panel_selector)
-
-        if not target_panel:
-            logger.warning(f"Panel with title '{panel_name}' not found")
-            return []
-
-        logger.info(f"Found panel '{panel_name}'")
-
-        try:
-            # Click the triple-dot menu (More options)
-            menu_btn = target_panel.query_selector('button[aria-label^="Panel menu"], button[aria-label*="More"]')
-            if not menu_btn:
-                logger.warning(f"Panel '{panel_name}': Menu button not found")
-                return []
-            menu_btn.click()
-            logger.info(f"Clicked panel menu for '{panel_name}'")
-
-            # Click Inspect → Data
-            page.locator("text=Inspect").click()
-            page.locator("text=Data").click()
-            logger.info(f"Clicked 'Inspect → Data' for '{panel_name}'")
-
-            # Wait for CSV button and download
-            page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
-            with page.expect_download() as download_info:
-                page.locator('button:has-text("Download CSV")').click()
-            download = download_info.value
-
-            safe_title = panel_name.replace(" ", "_").replace("/", "_").replace("$", "")
-            csv_path = os.path.join(output_dir, f"{safe_title}.csv")
-            download.save_as(csv_path)
-            csv_files.append(csv_path)
-            logger.info(f"Downloaded CSV → {csv_path}")
-
-        except Exception as e:
-            logger.error(f"Error downloading CSV for panel '{panel_name}': {e}")
-
-        browser.close()
-
-    logger.info(f"CSV export finished, downloaded {len(csv_files)} files")
-    return csv_files
 
 def list_dashboard_panels(dashboard_url, api_key=None):
     """
@@ -248,83 +200,114 @@ def list_dashboard_panels(dashboard_url, api_key=None):
 
         browser.close()
         return list(panel_titles)
+
+
+def query_prometheus(promql):
+    """Query Prometheus and return a list of results."""
+    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": promql})
+    resp.raise_for_status()
+    data = resp.json()
+    if data["status"] != "success":
+        raise ValueError("Prometheus query failed")
+    return data["data"]["result"]
+
+def build_total_consumption_table(cluster=None, projects=None, departments=None, time_range="1h"):
+    """Build a table similar to the Grafana 'Total consumption' panel."""
     
+    # Define PromQL expressions for each metric
+    queries = {
+        "GPU allocation hours": f'sum(sum_over_time((runai_allocated_gpu_count_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600',
+        "CPU allocation hours": f'sum(sum_over_time((runai_allocated_millicpus_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (department, project) / 3600 / 1000',
+        "Memory (GB) allocation hours": f'sum(sum_over_time((runai_allocated_memory_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600 / 1e9',
+        "CPU usage hours": f'sum(sum_over_time((runai_used_cpu_cores_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600',
+        "Memory (GB) usage hours": f'sum(sum_over_time((runai_used_memory_bytes_per_pod:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600 / 1e9',
+        "GPU Idle allocated hours": f'sum(sum_over_time((runai_gpu_idle_hours_per_queue:hourly{{clusterId=~"{cluster}", project=~"{projects}", department=~"{departments}"}}[{time_range}]))) by (project) / 3600'
+    }
+
+    dfs = []
+    for name, expr in queries.items():
+        results = query_prometheus(expr)
+        # Convert each Prometheus result to DataFrame
+        rows = []
+        for r in results:
+            metric = r.get("metric", {})
+            project = metric.get("project")
+            department = metric.get("department", "")
+            value = float(r["value"][1])
+            rows.append({"Project": project, "Department": department, name: value})
+        if rows:
+            df = pd.DataFrame(rows)
+            dfs.append(df)
+
+    # Merge all metrics on Project + Department
+    if not dfs:
+        return pd.DataFrame()  # no data
+
+    from functools import reduce
+    table = reduce(lambda left, right: pd.merge(left, right, on=["Project","Department"], how="outer"), dfs)
+    table = table.fillna(0)  # fill missing metrics with 0
+    return table
+
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
     temp_uid = None
     csv_files = []
 
     try:
-        # Step 0: Extract dashboard UID and clone without excluded panels
         dashboard_uid = extract_uid_from_url(dashboard_url)
-        temp_uid = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
+        temp_uid, table_panels = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
 
-        # Step 1: Render full dashboard to image
+        # --- Rebuild tables from Prometheus queries ---
+        for panel in table_panels:
+            logger.info(f"Rebuilding table: {panel['title']}")
+            combined_df = None
+            for expr in panel["queries"]:
+                results = query_prometheus(expr)
+                rows = []
+                for r in results:
+                    metric = r.get("metric", {})
+                    value = float(r["value"][1])
+                    rows.append({**metric, "value": value})
+                if rows:
+                    df = pd.DataFrame(rows)
+                    combined_df = df if combined_df is None else combined_df.merge(df, how="outer")
+            if combined_df is not None:
+                csv_path = f"/tmp/{panel['title'].replace(' ','_')}.csv"
+                combined_df.to_csv(csv_path, index=False)
+                csv_files.append(csv_path)
+                logger.info(f"Table saved as CSV: {csv_path}")
+
+        # --- Generate PDF as before ---
         render_url = f"{GRAFANA_URL}/render/d/{temp_uid}?kiosk&width={A4_WIDTH_PX}&height=10000&theme=light&tz=UTC&from={TIME_FROM}&to={TIME_TO}"
-        logger.info(f"Rendering dashboard at {render_url}")
         r = requests.get(render_url, headers=headers, stream=True, timeout=60)
         r.raise_for_status()
         img = Image.open(io.BytesIO(r.content))
-
-        # Step 2: Paginate image to A4 pages and generate PDF
         pages = paginate_to_a4(img)
-        logger.info(f"Dashboard paginated into {len(pages)} pages")
-
         pdf_path = f"/tmp/grafana_report_{temp_uid}.pdf"
         generate_pdf_from_pages(pages, pdf_path)
 
-        # Step 3: Download CSV only for the "Total consumption" panel
+        # --- Send email with attachments ---
         if email_to:
-            list_dashboard_panels(f"{GRAFANA_URL}/d/{dashboard_uid}", api_key=GRAFANA_API_KEY)
-            # try:
-            #     csv_files = download_specific_table_csv(
-            #         dashboard_url=f"{GRAFANA_URL}/d/{temp_uid}",
-            #         panel_name="Total consumption",
-            #         output_dir="/tmp/grafana_csvs",
-            #         api_key=GRAFANA_API_KEY
-            #     )
-            #     logger.info(f"Downloaded {len(csv_files)} CSVs for 'Total consumption'")
-            # except Exception as e:
-            #     logger.error(f"Failed to download CSV for 'Total consumption': {e}")
+            msg = EmailMessage()
+            msg["Subject"] = f"Grafana Report - {temp_uid} - {datetime.now().strftime('%Y-%m-%d')}"
+            msg["From"] = EMAIL_FROM
+            msg["To"] = email_to
 
-        # Step 4: Send email with PDF and CSV attachments
-        if email_to:
-            send_email_msg = EmailMessage()
-            send_email_msg["Subject"] = f"Grafana Report - {temp_uid} - {datetime.now().strftime('%Y-%m-%d')}"
-            send_email_msg["From"] = EMAIL_FROM
-            send_email_msg["To"] = email_to
-
-            # Attach PDF
             with open(pdf_path, "rb") as f:
-                send_email_msg.add_attachment(
-                    f.read(),
-                    maintype="application",
-                    subtype="pdf",
-                    filename=f"{temp_uid}.pdf"
-                )
+                msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{temp_uid}.pdf")
 
-            # Attach CSV(s)
             for csv_file in csv_files:
                 with open(csv_file, "rb") as f:
-                    send_email_msg.add_attachment(
-                        f.read(),
-                        maintype="text",
-                        subtype="csv",
-                        filename=os.path.basename(csv_file)
-                    )
+                    msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=os.path.basename(csv_file))
 
-            # Send email
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
                 server.starttls()
                 if SMTP_USERNAME and SMTP_PASSWORD:
                     server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                server.send_message(send_email_msg)
+                server.send_message(msg)
             logger.info(f"Email sent to {email_to}")
 
         logger.info(f"Report generation completed: PDF + {len(csv_files)} CSVs")
-
-    except Exception as e:
-        logger.error(f"Error during report generation: {e}")
 
     finally:
         if temp_uid:
