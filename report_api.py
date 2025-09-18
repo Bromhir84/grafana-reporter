@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import csv
+from playwright.sync_api import sync_playwright
 
 app = FastAPI(root_path=os.getenv("ROOT_PATH","/report"))
 
@@ -215,44 +216,48 @@ def send_email(dashboard_title, pdf_path, email_to):
         logger.error(f"Failed to send email: {e}")
         raise
 
-def export_table_panel_csv(dashboard_uid, panel_id, output_path):
-    url = f"{GRAFANA_URL}/api/ds/query"
-    payload = {
-        "queries": [
-            {
-                "refId": "A",
-                "datasource": {"type": "grafana-datasource", "uid": "your-datasource-uid"},
-                "panelId": panel_id,
-            }
-        ],
-        "range": {
-            "from": TIME_FROM,
-            "to": TIME_TO
-        },
-        "format": "table"
-    }
-    
-    headers = {
-        "Authorization": f"Bearer {GRAFANA_API_KEY}",
-        "Content-Type": "application/json"
-    }
+def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=None):
+    os.makedirs(output_dir, exist_ok=True)
+    csv_files = []
 
-    r = requests.post(url, json=payload, headers=headers)
-    r.raise_for_status()
-    data = r.json()
-    
-    # Assuming data structure matches Grafana table format
-    fields = data['results']['A']['frames'][0]['fields']
-    
-    with open(output_path, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        # Write headers
-        writer.writerow([f['name'] for f in fields])
-        # Write rows
-        for row_idx in range(len(fields[0]['values'])):
-            writer.writerow([f['values'][row_idx] for f in fields])
-    
-    logger.info(f"Table panel {panel_id} exported to {output_path}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(extra_http_headers={
+            "Authorization": f"Bearer {api_key}"
+        } if api_key else {})
+
+        page = context.new_page()
+        page.goto(dashboard_url)
+
+        # Wait for dashboard panels to load
+        page.wait_for_timeout(5000)  # adjust if dashboard is large
+
+        # Select all table panels
+        table_panels = page.query_selector_all('div.panel-container[data-panel-type="table"]')
+        for idx, panel in enumerate(table_panels, start=1):
+            try:
+                # Open panel menu
+                panel.hover()
+                panel.locator('button[aria-label="More options"]').click()
+                page.locator('text=Inspect').click()
+                page.locator('text=Data').click()
+                # Wait for Download CSV button
+                page.wait_for_selector('button:has-text("Download CSV")', timeout=5000)
+                csv_button = page.locator('button:has-text("Download CSV")')
+                
+                # Intercept download
+                with page.expect_download() as download_info:
+                    csv_button.click()
+                download = download_info.value
+                csv_path = os.path.join(output_dir, f"table_panel_{idx}.csv")
+                download.save_as(csv_path)
+                csv_files.append(csv_path)
+                page.go_back()  # Return to dashboard
+            except Exception as e:
+                logger.error(f"Failed to download CSV for panel {idx}: {e}")
+
+        browser.close()
+    return csv_files
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
@@ -292,16 +297,17 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         pdf_path = f"/tmp/grafana_report_{temp_uid}.pdf"
         generate_pdf_from_pages(pages, pdf_path)
 
-        # Step 5: Export table panels to CSV
-        panels, _ = get_dashboard_panels(temp_uid)
-        for panel in panels:
-            if panel["type"] == "table":
-                csv_path = f"/tmp/grafana_table_{panel['id']}.csv"
-                try:
-                    export_table_panel_csv(temp_uid, panel["id"], csv_path)
-                    csv_files.append(csv_path)
-                except Exception as e:
-                    logger.error(f"Failed to export CSV for panel {panel['id']}: {e}")
+        # Step 5: Download table CSVs using headless browser
+        if email_to:
+            try:
+                csv_files = download_table_csvs(
+                    f"{GRAFANA_URL}/d/{temp_uid}",
+                    output_dir="/tmp/grafana_csvs",
+                    api_key=GRAFANA_API_KEY
+                )
+                logger.info(f"Downloaded {len(csv_files)} table CSVs")
+            except Exception as e:
+                logger.error(f"Failed to download table CSVs: {e}")
 
         # Step 6: Send email if requested
         if email_to:
