@@ -81,7 +81,24 @@ def clone_dashboard_without_panels(original_uid, excluded_titles):
     r.raise_for_status()
     dashboard_data = r.json()["dashboard"]
 
-    dashboard_data["panels"] = filter_panels(dashboard_data.get("panels", []), [t.lower() for t in excluded_titles])
+    # Log all panel titles before filtering
+    all_panels = dashboard_data.get("panels", [])
+    if all_panels:
+        logger.info("Panels found in original dashboard:")
+        def log_panels(panels, prefix=""):
+            for panel in panels:
+                title = panel.get("title", "Unnamed Panel")
+                logger.info(f"{prefix}- {title}")
+                if "panels" in panel:
+                    log_panels(panel["panels"], prefix + "  ")
+        log_panels(all_panels)
+    else:
+        logger.info("No panels found in original dashboard")
+
+    # Filter out excluded panels
+    dashboard_data["panels"] = filter_panels(all_panels, [t.lower() for t in excluded_titles])
+
+    # Assign new UID and modify title
     dashboard_data["uid"] = f"{original_uid}-temp-{int(datetime.now().timestamp())}"
     dashboard_data["title"] += " (Temp Render)"
 
