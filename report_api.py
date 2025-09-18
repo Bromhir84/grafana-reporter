@@ -98,7 +98,6 @@ def clone_dashboard_without_panels(original_uid, excluded_titles):
     all_panels = dashboard_data.get("panels", [])
 
     # Log all panel titles before filtering
-    all_panels = dashboard_data.get("panels", [])
     if all_panels:
         logger.info("Panels found in original dashboard:")
         def log_panels(panels, prefix=""):
@@ -123,9 +122,9 @@ def clone_dashboard_without_panels(original_uid, excluded_titles):
     r = requests.post(save_url, headers=headers, json=payload)
     r.raise_for_status()
     logger.info(f"Temporary dashboard created: {dashboard_data['uid']}")
-    
-    # Collect table panels from the ORIGINAL (unfiltered) dashboard
-    table_panels = extract_table_panels(r.json()["dashboard"])
+
+    # ✅ Use the ORIGINAL dashboard to extract table panels
+    table_panels = extract_table_panels(r.json().get("dashboard", dashboard_data))
 
     return dashboard_data["uid"], table_panels
 
