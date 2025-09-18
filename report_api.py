@@ -131,7 +131,7 @@ def download_table_csvs(dashboard_uid, output_dir="/tmp/grafana_csvs"):
         page.goto(dashboard_url)
         page.wait_for_timeout(8000)
 
-        panels = page.query_selector_all("div[data-testid='data-testid panel content']")
+        panels = page.query_selector_all("div[role='region'][aria-label*='panel']")
         logger.info(f"Found {len(panels)} panels")
 
         for idx, panel in enumerate(panels, start=1):
