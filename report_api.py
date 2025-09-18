@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import csv
+import time
 
 app = FastAPI(root_path=os.getenv("ROOT_PATH","/report"))
 
@@ -86,43 +88,67 @@ def filter_panels(panels, excluded_titles_lower):
             filtered.append(panel)
     return filtered
 
-def clone_dashboard_without_panels(original_uid, excluded_titles):
+def clone_dashboard_without_panels(original_uid, excluded_titles, folder_name="Temp Reports"):
+    """
+    Clone the original dashboard, remove excluded panels, and save in a dedicated folder.
+    Returns the UID of the saved dashboard.
+    """
     logger.info(f"Fetching dashboard UID: {original_uid}")
     url = f"{GRAFANA_URL}/api/dashboards/uid/{original_uid}"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
     dashboard_data = r.json()
-
     dashboard = dashboard_data["dashboard"]
-    logger.info(f"Original dashboard has {len(dashboard.get('panels', []))} panels")
-
-    logger.info("Panels before filtering:")
-    for p in dashboard.get("panels", []):
-        logger.info(f"  - '{p.get('title')}'")
 
     # Remove panels by title
     excluded_titles_lower = [t.lower() for t in excluded_titles]
     dashboard["panels"] = filter_panels(dashboard.get("panels", []), excluded_titles_lower)
-    logger.info(f"Dashboard after filtering: {len(dashboard['panels'])} panels")
 
-    logger.info("Panels after filtering:")
-    for p in dashboard.get("panels", []):
-        logger.info(f"  - '{p.get('title')}'")
+    # Remove fields that Grafana doesn't allow on creation
+    dashboard.pop("id", None)
+    dashboard.pop("version", None)
 
-    # Give a new UID and modify title
-    dashboard["uid"] = f"{original_uid}-temp-{int(datetime.now().timestamp())}"
-    dashboard["title"] += " (Temp Render)"
+    # Make UID unique and URL-safe
+    timestamp = int(datetime.now().timestamp())
+    dashboard["uid"] = re.sub(r'[^a-zA-Z0-9_-]', '-', f"{original_uid}-temp-{timestamp}")
+    dashboard["title"] += f" (Temp Render {timestamp})"
 
+    # Ensure folder exists
+    folder_id = 0  # default folder
+    try:
+        # List folders
+        folders_url = f"{GRAFANA_URL}/api/folders"
+        resp = requests.get(folders_url, headers=headers)
+        resp.raise_for_status()
+        folders = resp.json()
+        folder = next((f for f in folders if f["title"] == folder_name), None)
+        if folder:
+            folder_id = folder["id"]
+        else:
+            # Create folder
+            create_url = f"{GRAFANA_URL}/api/folders"
+            r = requests.post(create_url, headers=headers, json={"title": folder_name})
+            r.raise_for_status()
+            folder_id = r.json()["id"]
+            logger.info(f"Created folder '{folder_name}' with ID {folder_id}")
+    except Exception as e:
+        logger.warning(f"Could not create/find folder '{folder_name}': {e}, saving to root folder.")
+
+    # Save cloned dashboard
     payload = {
         "dashboard": dashboard,
-        "folderId": 0,
+        "folderId": folder_id,
         "overwrite": False
     }
 
     save_url = f"{GRAFANA_URL}/api/dashboards/db"
     r = requests.post(save_url, headers=headers, json=payload)
     r.raise_for_status()
-    logger.info(f"Temporary dashboard created: {dashboard['uid']}")
+    logger.info(f"Temporary dashboard saved in '{folder_name}': {dashboard['uid']}")
+
+    # Small delay to ensure Grafana registers the dashboard
+    time.sleep(2)
+
     return dashboard["uid"]
 
 
@@ -194,14 +220,89 @@ def generate_pdf_from_pages(pages, output_path):
         f.write(img2pdf.convert(pages))
     logger.info(f"PDF saved to {output_path}")
 
-def send_email(dashboard_title, pdf_path, email_to):
+def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
+    """Fetch CSV for a single table panel with retry if 404 occurs."""
+    panel_id = panel.get("id")
+    panel_title = panel.get("title", f"Panel-{panel_id}")
+    panel_type = panel.get("type")
+
+    if panel_type != "table":
+        return None
+
+    url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}/panels/{panel_id}/data"
+    params = {"format": "csv", "from": TIME_FROM, "to": TIME_TO}
+
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=30)
+            r.raise_for_status()
+            logger.info(f"Fetched CSV for panel '{panel_title}'")
+            return r.text
+        except requests.HTTPError as e:
+            if r.status_code == 404 and attempt < retries:
+                logger.warning(f"CSV not ready for panel '{panel_title}', retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                logger.error(f"Failed to fetch CSV for panel '{panel_title}': {e}")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to fetch CSV for panel '{panel_title}': {e}")
+            return None
+
+def generate_csv_from_table_panels(panels, dashboard_uid, output_path):
+    """Combine all table panel CSVs into a single CSV file."""
+    all_rows = []
+    header_written = False
+
+    for panel in panels:
+        csv_content = fetch_table_panel_csv(panel, dashboard_uid)
+        if not csv_content:
+            continue
+
+        f = io.StringIO(csv_content)
+        reader = csv.reader(f)
+        rows = list(reader)
+        if not rows:
+            continue
+
+        # Prepend panel title column
+        header = ["Panel Title"] + rows[0]
+        data_rows = [[panel.get("title", "Panel")] + row for row in rows[1:]]
+
+        if not header_written:
+            with open(output_path, "w", newline="") as out_f:
+                writer = csv.writer(out_f)
+                writer.writerow(header)
+                writer.writerows(data_rows)
+            header_written = True
+        else:
+            with open(output_path, "a", newline="") as out_f:
+                writer = csv.writer(out_f)
+                writer.writerows(data_rows)
+
+        all_rows.extend(data_rows)
+
+    if all_rows:
+        logger.info(f"CSV saved to {output_path}")
+        return True
+    else:
+        logger.warning("No table panel data available to write.")
+        return False
+
+def send_email(dashboard_title, pdf_path, email_to, csv_path=None):
     msg = EmailMessage()
     msg["Subject"] = f"Grafana Report - {dashboard_title} - {datetime.now().strftime('%Y-%m-%d')}"
     msg["From"] = EMAIL_FROM
     msg["To"] = email_to
 
+    # Attach PDF
     with open(pdf_path, "rb") as f:
         msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{dashboard_title}.pdf")
+
+    # Attach CSV if available
+    if csv_path:
+        with open(csv_path, "rb") as f:
+            msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=f"{dashboard_title}.csv")
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -216,46 +317,43 @@ def send_email(dashboard_title, pdf_path, email_to):
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
-
     temp_uid = None
+
     try:
+        # Extract original dashboard UID
         dashboard_uid = extract_uid_from_url(dashboard_url)
 
-        # Fetch original dashboard title
-        url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
-        r = requests.get(url, headers=headers)
-        r.raise_for_status()
-        original_dashboard = r.json()["dashboard"]
-        original_title = original_dashboard.get("title", "Grafana Dashboard")
+        # Step 1: Clone dashboard into Temp Reports folder
+        temp_uid = clone_dashboard_without_panels(dashboard_uid, excluded_titles, folder_name="Temp Reports")
 
-        # Step 1: Clone dashboard without excluded panels
-        temp_uid = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
+        # Step 2: Fetch all panels
+        panels, dashboard_title = get_dashboard_panels(temp_uid)
 
-        # Step 2: Render full dashboard image in kiosk mode (tall image)
+        # Step 3: Render PDF
         render_url = (
             f"{GRAFANA_URL}/render/d/{temp_uid}"
-            f"?kiosk&width={A4_WIDTH_PX}&height=10000"  # height large enough to fit entire dashboard
+            f"?kiosk&width={A4_WIDTH_PX}&height=10000"
             f"&theme=light&tz=UTC&from={TIME_FROM}&to={TIME_TO}"
         )
         logger.info(f"Rendering dashboard at {render_url}")
         r = requests.get(render_url, headers=headers, stream=True, timeout=60)
         r.raise_for_status()
-
         img = Image.open(io.BytesIO(r.content))
-
-        # Step 3: Paginate image to A4 pages
         pages = paginate_to_a4(img)
-        logger.info(f"Dashboard paginated into {len(pages)} pages")
-
-        # Step 4: Generate PDF from pages
         pdf_path = f"/tmp/grafana_report_{temp_uid}.pdf"
         generate_pdf_from_pages(pages, pdf_path)
 
-        # Step 5: Send email if requested
-        if email_to:
-            send_email(original_title, pdf_path, email_to)
+        # Step 4: Generate CSV for table panels
+        csv_path = f"/tmp/grafana_report_{temp_uid}.csv"
+        csv_written = generate_csv_from_table_panels(panels, temp_uid, csv_path)
+        if not csv_written:
+            csv_path = None  # Skip CSV attachment if no table data
 
-        logger.info(f"Report generation completed: {pdf_path}")
+        # Step 5: Send email with PDF and CSV (if any)
+        if email_to:
+            send_email(dashboard_title, pdf_path, email_to, csv_path)
+
+        logger.info(f"Report generation completed for '{dashboard_title}'")
 
     except Exception as e:
         logger.error(f"Error during report generation: {e}")
@@ -263,7 +361,6 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
     finally:
         if temp_uid:
             delete_dashboard(temp_uid)
-
 
 @app.post("/generate_report/")
 async def generate_report(req: ReportRequest, background_tasks: BackgroundTasks):
