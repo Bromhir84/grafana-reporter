@@ -202,12 +202,10 @@ def extract_grafana_vars(dashboard_json):
     return vars_dict
 
 def resolve_grafana_vars(query: str, variables: dict) -> str:
-    """Replace Grafana-style template variables with provided values."""
+    """Replace Grafana template variables with provided values."""
     for var, value in variables.items():
-        # Replace $__all with '.*' if needed
-        if isinstance(value, list):
-            value = "|".join(value)  # or ".*" for all
-        if value == "$__all" or value == "":
+        # Replace empty or $__all with .*
+        if not value or value == "$__all":
             value = ".*"
         query = query.replace(f"${var}", value)
     return query
