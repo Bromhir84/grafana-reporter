@@ -257,12 +257,16 @@ def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
             "to": TIME_TO,
             "queries": [
                 {
-                    "datasource": datasource,
                     "refId": q.get("refId", "A"),
+                    "datasource": {
+                        "uid": datasource.get("uid") if isinstance(datasource, dict) else datasource,
+                        "type": datasource.get("type", "prometheus") if isinstance(datasource, dict) else "prometheus"
+                    },
                     "intervalMs": 60000,
                     "maxDataPoints": 500,
                     **q
-                } for q in queries
+                }
+                for q in queries
             ]
         }
 
