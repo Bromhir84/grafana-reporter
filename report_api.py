@@ -204,11 +204,14 @@ def download_specific_table_csv(dashboard_url, panel_name="Total consumption", o
     return csv_files
 
 def list_dashboard_panels(dashboard_url, api_key=None):
-    import os
+    """
+    Open the original dashboard in Playwright and print all panel titles.
+    Returns a list of panel titles.
+    """
     from playwright.sync_api import sync_playwright
+    import os
 
-    logger.info(f"Opening dashboard: {dashboard_url}")
-    panels_found = []
+    logger.info(f"Opening original dashboard: {dashboard_url}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -218,28 +221,29 @@ def list_dashboard_panels(dashboard_url, api_key=None):
 
         page = context.new_page()
         page.goto(dashboard_url)
-        page.wait_for_timeout(8000)  # wait for the dashboard to fully render
+        page.wait_for_timeout(8000)  # Wait for dashboard to fully render
         logger.info("Dashboard loaded")
 
-        # Find all sections with panels
-        panel_sections = page.query_selector_all("section[data-panel-id]")
-        if not panel_sections:
-            logger.warning("No panels found on the dashboard.")
+        # Try multiple selectors to catch panel titles
+        panel_headers = page.query_selector_all("h2, .css-1fxx2s4")  # Add other class names if needed
+        found_titles = []
+        for ph in panel_headers:
+            try:
+                title = ph.inner_text().strip()
+                if title:
+                    found_titles.append(title)
+            except Exception:
+                continue
+
+        if found_titles:
+            logger.info(f"Panels found on original dashboard:")
+            for t in found_titles:
+                logger.info(f" - {t}")
         else:
-            for section in panel_sections:
-                try:
-                    panel_id = section.get_attribute("data-panel-id")
-                    # Try to find the panel title inside h2 or other common header elements
-                    title_el = section.query_selector("h2, h3, .panel-title")
-                    title = title_el.inner_text().strip() if title_el else f"Panel-{panel_id}"
-                    panels_found.append({"id": panel_id, "title": title})
-                    logger.info(f"Found panel: ID={panel_id}, Title='{title}'")
-                except Exception as e:
-                    logger.warning(f"Error reading panel in section {section}: {e}")
+            logger.warning("No panels found on the original dashboard.")
 
         browser.close()
-
-    return panels_found
+        return found_titles
     
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
