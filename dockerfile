@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     fonts-liberation \
     libwoff1 \
-    libwoff2-2 \
+    libxfixes3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user and directories
@@ -49,10 +49,10 @@ USER appuser
 ENV PATH=/home/appuser/.local/bin:$PATH
 
 # Install Python dependencies
-RUN pip install --user --no-cache-dir -r /app/repo/requirements.txt
+RUN pip install --user --no-cache-dir playwright
 
 # Install Playwright browsers at build time
-RUN playwright install --with-deps
+RUN playwright install
 
 # Entrypoint to start your app
 ENTRYPOINT ["/app/setup.sh"]

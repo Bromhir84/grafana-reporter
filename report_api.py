@@ -217,8 +217,25 @@ def send_email(dashboard_title, pdf_path, email_to):
         raise
 
 def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=None):
+    """
+    Downloads all table panels from a Grafana dashboard using Playwright.
+    Returns a list of local CSV file paths.
+    """
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
+
+    # Panels to target by title (adjust or leave empty to download all table panels)
+    # You can also dynamically fetch titles from get_dashboard_panels()
+    table_panel_titles = [
+        "Cumulative GPU allocation per $grouping",
+        "Cumulative CPU allocation per $grouping",
+        "Cumulative memory allocation per $grouping",
+        "Consumption types",
+        "Total consumption",
+        "Total department consumption",
+        "GPU allocation over time",
+        "Project over-quota GPU consumption"
+    ]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -230,31 +247,55 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
         page.goto(dashboard_url)
 
         # Wait for dashboard panels to load
-        page.wait_for_timeout(5000)  # adjust if dashboard is large
+        page.wait_for_timeout(8000)  # Adjust depending on dashboard complexity
 
-        # Select all table panels
-        table_panels = page.query_selector_all('div.panel-container[data-panel-type="table"]')
-        for idx, panel in enumerate(table_panels, start=1):
+        # Select all panels
+        panel_elements = page.query_selector_all("div.panel-content")
+
+        for idx, panel in enumerate(panel_elements, start=1):
             try:
-                # Open panel menu
+                # Get panel title
+                title_elem = panel.query_selector("div.panel-title-text")
+                if not title_elem:
+                    continue
+                title_text = title_elem.inner_text().strip()
+
+                if title_text not in table_panel_titles:
+                    continue  # Skip non-table panels
+
+                logger.info(f"Processing table panel: {title_text}")
+
+                # Hover and open menu
                 panel.hover()
-                panel.locator('button[aria-label="More options"]').click()
-                page.locator('text=Inspect').click()
-                page.locator('text=Data').click()
+                menu_button = panel.query_selector('button[aria-label="More options"]')
+                if not menu_button:
+                    logger.warning(f"Menu button not found for panel '{title_text}'")
+                    continue
+                menu_button.click()
+                page.locator("text=Inspect").click()
+                page.locator("text=Data").click()
+
                 # Wait for Download CSV button
                 page.wait_for_selector('button:has-text("Download CSV")', timeout=5000)
                 csv_button = page.locator('button:has-text("Download CSV")')
-                
+
                 # Intercept download
                 with page.expect_download() as download_info:
                     csv_button.click()
                 download = download_info.value
-                csv_path = os.path.join(output_dir, f"table_panel_{idx}.csv")
+                safe_title = title_text.replace(" ", "_").replace("$", "")
+                csv_path = os.path.join(output_dir, f"{safe_title}.csv")
                 download.save_as(csv_path)
                 csv_files.append(csv_path)
-                page.go_back()  # Return to dashboard
+
+                logger.info(f"Downloaded CSV for panel '{title_text}' → {csv_path}")
+
+                # Go back to dashboard
+                page.goto(dashboard_url)
+                page.wait_for_timeout(2000)
+
             except Exception as e:
-                logger.error(f"Failed to download CSV for panel {idx}: {e}")
+                logger.error(f"Failed to download CSV for panel '{title_text if title_elem else idx}': {e}")
 
         browser.close()
     return csv_files
