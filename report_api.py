@@ -65,47 +65,67 @@ class ReportRequest(BaseModel):
     email_report: bool = False
     email_to: str = None
 
-def compute_range_duration(time_from: str, time_to: str) -> str:
-    """Compute Prometheus-compatible duration string from Grafana-style TIME_FROM/TIME_TO."""
+def parse_grafana_time(time_str: str) -> datetime:
+    """
+    Parse Grafana time expressions like:
+      - now
+      - now-6h
+      - now-1M/M
+      - now/M
+    Returns a UTC datetime.
+    """
+    now = datetime.utcnow().replace(microsecond=0)
     
-    def parse_grafana_time(t: str) -> datetime:
-        t = t.strip()
-        if t == "now":
-            return datetime.utcnow()
-        # Handle month rounding e.g., now-1M/M
-        m = re.match(r"now-(\d+)M/M", t)
-        if m:
-            months_back = int(m.group(1))
-            dt = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            dt -= relativedelta.relativedelta(months=months_back)
-            return dt
-        # Handle now/M (start of current month)
-        if t == "now/M":
-            dt = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            return dt
-        # Fallback: relative hours/days like now-6h
-        m = re.match(r"now-(\d+)([smhdw])", t)
-        if m:
-            value, unit = m.groups()
-            kwargs = {"s": 0, "m": 0, "h": 0, "d": 0, "w": 0}
-            kwargs[{"s":"s","m":"m","h":"h","d":"d","w":"w"}[unit]] = int(value)
-            return datetime.utcnow() - timedelta(**kwargs)
-        # Try parsing absolute time
-        return parser.parse(t)
+    if time_str == "now":
+        return now
 
+    # Match relative offset: now-6h, now-30m, now-1d, now-1M
+    m = re.match(r"now-(\d+)([smhdwM])", time_str)
+    if m:
+        value, unit = m.groups()
+        value = int(value)
+        if unit == "s":
+            dt = now - relativedelta(seconds=value)
+        elif unit == "m":
+            dt = now - relativedelta(minutes=value)
+        elif unit == "h":
+            dt = now - relativedelta(hours=value)
+        elif unit == "d":
+            dt = now - relativedelta(days=value)
+        elif unit == "w":
+            dt = now - relativedelta(weeks=value)
+        elif unit == "M":
+            dt = now - relativedelta(months=value)
+        else:
+            dt = now
+    else:
+        dt = now
+
+    # Snap to start of period if /M, /d, /w
+    if time_str.endswith("/M"):
+        dt = dt.replace(day=1, hour=0, minute=0, second=0)
+    elif time_str.endswith("/d"):
+        dt = dt.replace(hour=0, minute=0, second=0)
+    elif time_str.endswith("/w"):
+        # Snap to previous Monday
+        dt = dt - relativedelta(days=dt.weekday())
+        dt = dt.replace(hour=0, minute=0, second=0)
+
+    return dt
+
+def compute_range_from_env(time_from: str, time_to: str):
+    """Return start and end datetime based on TIME_FROM and TIME_TO."""
     start = parse_grafana_time(time_from)
     end = parse_grafana_time(time_to)
-    delta = end - start
+    return start, end
 
-    # Convert timedelta to Prometheus duration
-    if delta.days > 0:
-        return f"{delta.days}d"
-    elif delta.seconds >= 3600:
-        return f"{delta.seconds // 3600}h"
-    elif delta.seconds >= 60:
-        return f"{delta.seconds // 60}m"
-    else:
-        return f"{delta.seconds}s"
+def compute_prometheus_duration(start: datetime, end: datetime) -> str:
+    """Return Prometheus duration string (e.g., '720h') for use in sum_over_time."""
+    delta = end - start
+    # Prometheus durations: seconds (s), minutes (m), hours (h), days (d)
+    # We'll convert everything to hours for convenience
+    hours = int(delta.total_seconds() / 3600)
+    return f"{hours}h"
 
 def extract_uid_from_url(url: str) -> str:
     match = re.search(r"/d/([^/]+)/", url)
@@ -246,15 +266,16 @@ def extract_grafana_vars(dashboard_json):
         vars_dict[v["name"]] = str(value)
     return vars_dict
 
-def resolve_grafana_vars(query: str, variables: dict) -> str:
+def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime) -> str:
+    """Replace Grafana template variables with provided values, including $__range."""
     for var, value in variables.items():
-        if not value or value in ("$__all", "['$__all']"):
+        if not value or value == "$__all":
             value = ".*"
-        # Clean brackets/quotes
-        value = re.sub(r"[\[\]']+", "", str(value))
         query = query.replace(f"${var}", value)
-    # Always replace $__range with your computed Prometheus range
-    query = query.replace("$__range", compute_range_duration(TIME_FROM, TIME_TO_CSV))
+    
+    # Replace $__range with the correct duration
+    query = query.replace("$__range", compute_prometheus_duration(start, end))
+    
     return query
 
 def query_prometheus(expr: str):
@@ -263,6 +284,21 @@ def query_prometheus(expr: str):
         params={"query": expr},
         timeout=30
     )
+    resp.raise_for_status()
+    return resp.json()
+
+def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int = 3600):
+    """
+    Query Prometheus over a fixed time range.
+    step: seconds between data points (default 1h)
+    """
+    params = {
+        "query": expr,
+        "start": int(start.timestamp()),
+        "end": int(end.timestamp()),
+        "step": step
+    }
+    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query_range", params=params, timeout=60)
     resp.raise_for_status()
     return resp.json()
 
@@ -291,20 +327,21 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         dashboard_uid = extract_uid_from_url(dashboard_url)
         temp_uid, table_panels, GRAFANA_VARS = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
 
-        # --- Step 2: Build CSVs for table panels ---
+        # Step 2: Build CSVs for table panels
+        start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO)
+        logger.info(f"Querying Prometheus from {start_dt} to {end_dt}")
+
         for panel in table_panels:
             logger.info(f"Rebuilding table panel: {panel['title']}")
             combined_df = None
 
+            # Compute start/end from env
+            start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO)
+
             for expr in panel["queries"]:
-                # Resolve Grafana variables before querying Prometheus
-                expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS)
-
-                # Log the resolved query
-                logger.info(f"Executing Prometheus query: {expr_resolved}")
-
+                expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
                 try:
-                    results = query_prometheus(expr_resolved)
+                    results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
@@ -312,15 +349,13 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 rows = []
                 for r in results.get("data", {}).get("result", []):
                     metric = r.get("metric", {})
-                    try:
-                        value = float(r["value"][1])
-                    except (KeyError, ValueError, TypeError):
-                        value = None
-                    rows.append({**metric, "value": value})
+                    for value_pair in r.get("values", []):  # [timestamp, value]
+                        timestamp, value = value_pair
+                        rows.append({**metric, "timestamp": datetime.utcfromtimestamp(timestamp), "value": float(value)})
 
                 if rows:
                     df = pd.DataFrame(rows)
-                    combined_df = df if combined_df is None else combined_df.merge(df, how="outer")
+                    combined_df = df if combined_df is None else pd.concat([combined_df, df], ignore_index=True)
 
             if combined_df is not None and not combined_df.empty:
                 csv_path = f"/tmp/{panel['title'].replace(' ', '_')}.csv"
