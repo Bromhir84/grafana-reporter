@@ -245,27 +245,57 @@ def resolve_datasource(datasource):
         return None, None
 
     return None, None
-    
+
 def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
     """
     Fetch CSV for a single table panel using Grafana's /api/ds/query endpoint.
+    Resolves datasource UID+type correctly (by uid or name).
     """
+    import io, csv
+
+    def resolve_datasource(datasource):
+        """
+        Normalize panel.datasource into (uid, type).
+        Supports dict, uid string, and name string.
+        """
+        if isinstance(datasource, dict):
+            return datasource.get("uid"), datasource.get("type")
+
+        if isinstance(datasource, str):
+            # Try UID
+            resp = requests.get(f"{GRAFANA_URL}/api/datasources/uid/{datasource}",
+                                headers=headers, timeout=30)
+            if resp.status_code == 200:
+                ds_info = resp.json()
+                return ds_info["uid"], ds_info["type"]
+
+            # Try NAME
+            resp = requests.get(f"{GRAFANA_URL}/api/datasources/name/{datasource}",
+                                headers=headers, timeout=30)
+            if resp.status_code == 200:
+                ds_info = resp.json()
+                return ds_info["uid"], ds_info["type"]
+
+            logger.error(f"Datasource '{datasource}' not found in Grafana")
+            return None, None
+
+        return None, None
+
     panel_id = panel.get("id")
     panel_title = panel.get("title", f"Panel-{panel_id}")
     panel_type = panel.get("type")
 
-    # Only process table panels
     if panel_type != "table":
         return None
 
     try:
-        # Step 1: Fetch dashboard definition (to get datasource + queries)
+        # Step 1: Fetch dashboard definition
         url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
         dashboard = resp.json()["dashboard"]
 
-        # Locate this panel's full config
+        # Step 2: Locate this panel definition
         panel_def = next((p for p in dashboard.get("panels", []) if p.get("id") == panel_id), None)
         if not panel_def:
             logger.error(f"Panel {panel_id} not found in dashboard {dashboard_uid}")
@@ -277,17 +307,13 @@ def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
             logger.warning(f"No queries found for panel '{panel_title}'")
             return None
 
-        # Step 2: Build payload for /api/ds/query
-        # If datasource is string (uid), fetch full datasource details
-        if isinstance(datasource, str):
-            ds_resp = requests.get(f"{GRAFANA_URL}/api/datasources/uid/{datasource}", headers=headers, timeout=30)
-            ds_resp.raise_for_status()
-            ds_info = ds_resp.json()
-            ds_uid = ds_info["uid"]
-            ds_type = ds_info["type"]
-        else:
-            ds_uid = datasource.get("uid")
-            ds_type = datasource.get("type", "prometheus")
+        # Step 3: Resolve datasource to uid+type
+        ds_uid, ds_type = resolve_datasource(datasource)
+        if not ds_uid:
+            logger.error(f"Skipping panel '{panel_title}' because datasource could not be resolved")
+            return None
+
+        # Step 4: Build payload
         payload = {
             "from": TIME_FROM,
             "to": TIME_TO,
@@ -305,7 +331,7 @@ def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
 
         query_url = f"{GRAFANA_URL}/api/ds/query"
 
-        # Step 3: Retry loop
+        # Step 5: Retry loop
         for attempt in range(1, retries + 1):
             try:
                 r = requests.post(query_url, headers=headers, json=payload, timeout=60)
@@ -313,7 +339,7 @@ def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
                 data = r.json()
                 logger.info(f"Fetched data for panel '{panel_title}'")
 
-                # Step 4: Convert JSON results to CSV
+                # Step 6: Convert JSON results to CSV
                 results = data.get("results", {})
                 rows = []
                 header = ["Panel Title"]
@@ -324,14 +350,12 @@ def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
                         schema = frame.get("schema", {})
                         fields = schema.get("fields", [])
                         names = [f["name"] for f in fields]
-                        if len(header) == 1:  # only once
+                        if len(header) == 1:
                             header.extend(names)
                         values = frame.get("data", {}).get("values", [])
-                        # transpose columns -> rows
                         for row in zip(*values):
                             rows.append([panel_title] + list(row))
 
-                # Convert to CSV string
                 if not rows:
                     logger.warning(f"No rows found for panel '{panel_title}'")
                     return None
