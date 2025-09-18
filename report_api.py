@@ -239,7 +239,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
     try:
         # --- Step 1: Clone dashboard and extract table panels ---
         dashboard_uid = extract_uid_from_url(dashboard_url)
-        temp_uid, table_panels = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
+        temp_uid, table_panels, GRAFANA_VARS = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
 
         # --- Step 2: Build CSVs for table panels ---
         for panel in table_panels:
