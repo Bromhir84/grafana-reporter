@@ -186,36 +186,67 @@ def download_specific_table_csv(dashboard_url, panel_name="Total consumption", o
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
     temp_uid = None
+    csv_files = []
+
     try:
+        # Step 0: Extract dashboard UID and clone without excluded panels
         dashboard_uid = extract_uid_from_url(dashboard_url)
         temp_uid = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
 
+        # Step 1: Render full dashboard to image
         render_url = f"{GRAFANA_URL}/render/d/{temp_uid}?kiosk&width={A4_WIDTH_PX}&height=10000&theme=light&tz=UTC&from={TIME_FROM}&to={TIME_TO}"
         logger.info(f"Rendering dashboard at {render_url}")
         r = requests.get(render_url, headers=headers, stream=True, timeout=60)
         r.raise_for_status()
         img = Image.open(io.BytesIO(r.content))
 
+        # Step 2: Paginate image to A4 pages and generate PDF
         pages = paginate_to_a4(img)
         logger.info(f"Dashboard paginated into {len(pages)} pages")
 
         pdf_path = f"/tmp/grafana_report_{temp_uid}.pdf"
         generate_pdf_from_pages(pages, pdf_path)
 
-        csv_files = []
+        # Step 3: Download CSV only for the "Total consumption" panel
         if email_to:
-            csv_files = download_table_csvs(temp_uid)
+            try:
+                csv_files = download_specific_table_csv(
+                    dashboard_url=f"{GRAFANA_URL}/d/{temp_uid}",
+                    panel_name="Total consumption",
+                    output_dir="/tmp/grafana_csvs",
+                    api_key=GRAFANA_API_KEY
+                )
+                logger.info(f"Downloaded {len(csv_files)} CSVs for 'Total consumption'")
+            except Exception as e:
+                logger.error(f"Failed to download CSV for 'Total consumption': {e}")
 
+        # Step 4: Send email with PDF and CSV attachments
         if email_to:
             send_email_msg = EmailMessage()
             send_email_msg["Subject"] = f"Grafana Report - {temp_uid} - {datetime.now().strftime('%Y-%m-%d')}"
             send_email_msg["From"] = EMAIL_FROM
             send_email_msg["To"] = email_to
+
+            # Attach PDF
             with open(pdf_path, "rb") as f:
-                send_email_msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{temp_uid}.pdf")
+                send_email_msg.add_attachment(
+                    f.read(),
+                    maintype="application",
+                    subtype="pdf",
+                    filename=f"{temp_uid}.pdf"
+                )
+
+            # Attach CSV(s)
             for csv_file in csv_files:
                 with open(csv_file, "rb") as f:
-                    send_email_msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=os.path.basename(csv_file))
+                    send_email_msg.add_attachment(
+                        f.read(),
+                        maintype="text",
+                        subtype="csv",
+                        filename=os.path.basename(csv_file)
+                    )
+
+            # Send email
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
                 server.starttls()
                 if SMTP_USERNAME and SMTP_PASSWORD:
@@ -224,8 +255,10 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             logger.info(f"Email sent to {email_to}")
 
         logger.info(f"Report generation completed: PDF + {len(csv_files)} CSVs")
+
     except Exception as e:
         logger.error(f"Error during report generation: {e}")
+
     finally:
         if temp_uid:
             delete_dashboard(temp_uid)
