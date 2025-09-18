@@ -219,7 +219,6 @@ def send_email(dashboard_title, pdf_path, email_to):
 def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=None):
     import os
     from playwright.sync_api import sync_playwright
-
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
 
@@ -236,24 +235,30 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
         page.wait_for_timeout(8000)  # wait for dashboard to render
         logger.info("Dashboard loaded, looking for panels...")
 
-        # Use stable selector for panels
-        panels = page.query_selector_all("section[aria-labelledby], section[data-testid^='data-testid Panel header']")
-        logger.info(f"Found {len(panels)} panels")
+        # Scroll through all panels and collect them
+        panels = []
+        sections = page.query_selector_all("section[data-testid^='data-testid Panel header']")
+        for section in sections:
+            page.evaluate("section => section.scrollIntoView()", section)
+            page.wait_for_timeout(200)  # let it render
+            panels.append(section)
+
+        logger.info(f"Found {len(panels)} panels after scrolling")
 
         for idx, panel in enumerate(panels, start=1):
             try:
-                # Use stable selector for panel title
-                panel_title_elem = panel.query_selector("h2[title]")
-                panel_title = panel_title_elem.inner_text().strip() if panel_title_elem else f"panel_{idx}"
+                # Panel title
+                title_elem = panel.query_selector("h2")
+                panel_title = title_elem.inner_text().strip() if title_elem else f"panel_{idx}"
                 logger.info(f"Processing panel {idx}: '{panel_title}'")
 
-                panel.hover()
-                menu_btn = panel.query_selector(f'button[aria-label^="Menu for panel"]')
+                # Open panel menu
+                menu_btn = panel.query_selector('button[aria-label^="Menu for panel"]')
                 if not menu_btn:
                     logger.warning(f"Panel '{panel_title}': No menu button found, skipping CSV export")
                     continue
                 menu_btn.click()
-                logger.info(f"Panel '{panel_title}': Clicked menu")
+                logger.info(f"Panel '{panel_title}': Clicked 'Menu'")
 
                 # Click Inspect → Data
                 inspect_btn = page.locator("text=Inspect")
@@ -270,7 +275,7 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                 data_btn.click()
                 logger.info(f"Panel '{panel_title}': Clicked 'Data'")
 
-                # Wait for CSV button
+                # Wait for and click Download CSV
                 try:
                     page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
                     csv_button = page.locator('button:has-text("Download CSV")')
@@ -291,7 +296,7 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                 except Exception as e:
                     logger.error(f"Panel '{panel_title}': Error waiting for or clicking 'Download CSV': {e}")
 
-                # Go back to dashboard before next panel
+                # Return to dashboard view before next panel
                 page.goto(dashboard_url)
                 page.wait_for_timeout(2000)
 
@@ -299,7 +304,6 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                 logger.error(f"Unexpected error processing panel {idx}: {e}")
 
         browser.close()
-
     logger.info(f"CSV export finished, downloaded {len(csv_files)} files")
     return csv_files
 
