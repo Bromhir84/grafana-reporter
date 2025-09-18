@@ -8,8 +8,9 @@ import csv
 import time
 import img2pdf
 import requests
-from datetime import datetime, timedelta
-from dateutil import parser, relativedelta
+from datetime import datetime
+from dateutil import relativedelta
+from dateutil.parser import parse
 from email.message import EmailMessage
 import smtplib
 import pandas as pd
