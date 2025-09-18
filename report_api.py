@@ -27,7 +27,7 @@ app.add_middleware(
 )
 
 # Environment variables
-PROMETHEUS_URL = os.getenv("http://your-prometheus-server:9090")
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL","http://your-prometheus-server:9090")
 GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
 GRAFANA_API_KEY = os.getenv("GRAFANA_API_KEY")
 TIME_FROM = os.getenv("TIME_FROM", "now-6h")
