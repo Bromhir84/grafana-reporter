@@ -252,6 +252,16 @@ def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
             return None
 
         # Step 2: Build payload for /api/ds/query
+        # If datasource is string (uid), fetch full datasource details
+        if isinstance(datasource, str):
+            ds_resp = requests.get(f"{GRAFANA_URL}/api/datasources/uid/{datasource}", headers=headers, timeout=30)
+            ds_resp.raise_for_status()
+            ds_info = ds_resp.json()
+            ds_uid = ds_info["uid"]
+            ds_type = ds_info["type"]
+        else:
+            ds_uid = datasource.get("uid")
+            ds_type = datasource.get("type", "prometheus")
         payload = {
             "from": TIME_FROM,
             "to": TIME_TO,
