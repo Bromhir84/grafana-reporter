@@ -13,7 +13,6 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import csv
-import time
 
 app = FastAPI(root_path=os.getenv("ROOT_PATH","/report"))
 
@@ -88,67 +87,43 @@ def filter_panels(panels, excluded_titles_lower):
             filtered.append(panel)
     return filtered
 
-def clone_dashboard_without_panels(original_uid, excluded_titles, folder_name="Temp Reports"):
-    """
-    Clone the original dashboard, remove excluded panels, and save in a dedicated folder.
-    Returns the UID of the saved dashboard.
-    """
+def clone_dashboard_without_panels(original_uid, excluded_titles):
     logger.info(f"Fetching dashboard UID: {original_uid}")
     url = f"{GRAFANA_URL}/api/dashboards/uid/{original_uid}"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
     dashboard_data = r.json()
+
     dashboard = dashboard_data["dashboard"]
+    logger.info(f"Original dashboard has {len(dashboard.get('panels', []))} panels")
+
+    logger.info("Panels before filtering:")
+    for p in dashboard.get("panels", []):
+        logger.info(f"  - '{p.get('title')}'")
 
     # Remove panels by title
     excluded_titles_lower = [t.lower() for t in excluded_titles]
     dashboard["panels"] = filter_panels(dashboard.get("panels", []), excluded_titles_lower)
+    logger.info(f"Dashboard after filtering: {len(dashboard['panels'])} panels")
 
-    # Remove fields that Grafana doesn't allow on creation
-    dashboard.pop("id", None)
-    dashboard.pop("version", None)
+    logger.info("Panels after filtering:")
+    for p in dashboard.get("panels", []):
+        logger.info(f"  - '{p.get('title')}'")
 
-    # Make UID unique and URL-safe
-    timestamp = int(datetime.now().timestamp())
-    dashboard["uid"] = re.sub(r'[^a-zA-Z0-9_-]', '-', f"{original_uid}-temp-{timestamp}")
-    dashboard["title"] += f" (Temp Render {timestamp})"
+    # Give a new UID and modify title
+    dashboard["uid"] = f"{original_uid}-temp-{int(datetime.now().timestamp())}"
+    dashboard["title"] += " (Temp Render)"
 
-    # Ensure folder exists
-    folder_id = 0  # default folder
-    try:
-        # List folders
-        folders_url = f"{GRAFANA_URL}/api/folders"
-        resp = requests.get(folders_url, headers=headers)
-        resp.raise_for_status()
-        folders = resp.json()
-        folder = next((f for f in folders if f["title"] == folder_name), None)
-        if folder:
-            folder_id = folder["id"]
-        else:
-            # Create folder
-            create_url = f"{GRAFANA_URL}/api/folders"
-            r = requests.post(create_url, headers=headers, json={"title": folder_name})
-            r.raise_for_status()
-            folder_id = r.json()["id"]
-            logger.info(f"Created folder '{folder_name}' with ID {folder_id}")
-    except Exception as e:
-        logger.warning(f"Could not create/find folder '{folder_name}': {e}, saving to root folder.")
-
-    # Save cloned dashboard
     payload = {
         "dashboard": dashboard,
-        "folderId": folder_id,
+        "folderId": 0,
         "overwrite": False
     }
 
     save_url = f"{GRAFANA_URL}/api/dashboards/db"
     r = requests.post(save_url, headers=headers, json=payload)
     r.raise_for_status()
-    logger.info(f"Temporary dashboard saved in '{folder_name}': {dashboard['uid']}")
-
-    # Small delay to ensure Grafana registers the dashboard
-    time.sleep(2)
-
+    logger.info(f"Temporary dashboard created: {dashboard['uid']}")
     return dashboard["uid"]
 
 
@@ -220,219 +195,14 @@ def generate_pdf_from_pages(pages, output_path):
         f.write(img2pdf.convert(pages))
     logger.info(f"PDF saved to {output_path}")
 
-def resolve_datasource(datasource):
-    """
-    Given a panel.datasource (string name, string uid, or dict),
-    fetch the correct uid and type from Grafana.
-    """
-    if isinstance(datasource, dict):
-        return datasource.get("uid"), datasource.get("type")
-
-    if isinstance(datasource, str):
-        # Try by UID first
-        resp = requests.get(f"{GRAFANA_URL}/api/datasources/uid/{datasource}", headers=headers, timeout=30)
-        if resp.status_code == 200:
-            ds_info = resp.json()
-            return ds_info["uid"], ds_info["type"]
-
-        # Try by NAME
-        resp = requests.get(f"{GRAFANA_URL}/api/datasources/name/{datasource}", headers=headers, timeout=30)
-        if resp.status_code == 200:
-            ds_info = resp.json()
-            return ds_info["uid"], ds_info["type"]
-
-        logger.error(f"Datasource '{datasource}' not found in Grafana")
-        return None, None
-
-    return None, None
-
-def fetch_table_panel_csv(panel, dashboard_uid, retries=3, delay=2):
-    """
-    Fetch CSV for a single table panel using Grafana's /api/ds/query endpoint.
-    Resolves datasource UID+type correctly (by uid or name).
-    """
-    import io, csv
-
-    def resolve_datasource(datasource):
-        """
-        Normalize panel.datasource into (uid, type).
-        Supports dict, uid string, and name string.
-        """
-        if isinstance(datasource, dict):
-            return datasource.get("uid"), datasource.get("type")
-
-        if isinstance(datasource, str):
-            # Try UID
-            resp = requests.get(f"{GRAFANA_URL}/api/datasources/uid/{datasource}",
-                                headers=headers, timeout=30)
-            if resp.status_code == 200:
-                ds_info = resp.json()
-                return ds_info["uid"], ds_info["type"]
-
-            # Try NAME
-            resp = requests.get(f"{GRAFANA_URL}/api/datasources/name/{datasource}",
-                                headers=headers, timeout=30)
-            if resp.status_code == 200:
-                ds_info = resp.json()
-                return ds_info["uid"], ds_info["type"]
-
-            logger.error(f"Datasource '{datasource}' not found in Grafana")
-            return None, None
-
-        return None, None
-
-    panel_id = panel.get("id")
-    panel_title = panel.get("title", f"Panel-{panel_id}")
-    panel_type = panel.get("type")
-
-    if panel_type != "table":
-        return None
-
-    try:
-        # Step 1: Fetch dashboard definition
-        url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        dashboard = resp.json()["dashboard"]
-
-        # Step 2: Locate this panel definition
-        panel_def = next((p for p in dashboard.get("panels", []) if p.get("id") == panel_id), None)
-        if not panel_def:
-            logger.error(f"Panel {panel_id} not found in dashboard {dashboard_uid}")
-            return None
-
-        datasource = panel_def.get("datasource")
-        queries = panel_def.get("targets", [])
-        if not queries:
-            logger.warning(f"No queries found for panel '{panel_title}'")
-            return None
-
-        # Step 3: Resolve datasource to uid+type
-        ds_uid, ds_type = resolve_datasource(datasource)
-        if not ds_uid:
-            logger.error(f"Skipping panel '{panel_title}' because datasource could not be resolved")
-            return None
-
-        # Step 4: Build payload
-        logger.debug(f"Panel '{panel_title}' datasource: {datasource}, type: {panel_type}, targets: {queries}")
-        payload = {
-            "from": TIME_FROM,
-            "to": TIME_TO,
-            "queries": [
-                {
-                    "refId": q.get("refId", "A"),
-                    "datasource": {"uid": ds_uid, "type": ds_type},
-                    "intervalMs": 60000,
-                    "maxDataPoints": 500,
-                    **q
-                }
-                for q in queries
-            ]
-        }
-
-        query_url = f"{GRAFANA_URL}/api/ds/query"
-
-        # Step 5: Retry loop
-        for attempt in range(1, retries + 1):
-            try:
-                r = requests.post(query_url, headers=headers, json=payload, timeout=60)
-                r.raise_for_status()
-                data = r.json()
-                logger.info(f"Fetched data for panel '{panel_title}'")
-
-                # Step 6: Convert JSON results to CSV
-                results = data.get("results", {})
-                rows = []
-                header = ["Panel Title"]
-
-                for _, result in results.items():
-                    frames = result.get("frames", [])
-                    for frame in frames:
-                        schema = frame.get("schema", {})
-                        fields = schema.get("fields", [])
-                        names = [f["name"] for f in fields]
-                        if len(header) == 1:
-                            header.extend(names)
-                        values = frame.get("data", {}).get("values", [])
-                        for row in zip(*values):
-                            rows.append([panel_title] + list(row))
-
-                if not rows:
-                    logger.warning(f"No rows found for panel '{panel_title}'")
-                    return None
-
-                buf = io.StringIO()
-                writer = csv.writer(buf)
-                writer.writerow(header)
-                writer.writerows(rows)
-                return buf.getvalue()
-
-            except requests.HTTPError as e:
-                if r.status_code == 404 and attempt < retries:
-                    logger.warning(f"Data not ready for panel '{panel_title}', retrying in {delay}s...")
-                    time.sleep(delay)
-                else:
-                    logger.error(f"Failed to fetch data for panel '{panel_title}': {e}")
-                    return None
-
-    except Exception as e:
-        logger.error(f"Error fetching CSV for panel '{panel_title}': {e}")
-        return None
-
-def generate_csv_from_table_panels(panels, dashboard_uid, output_path):
-    """Combine all table panel CSVs into a single CSV file."""
-    all_rows = []
-    header_written = False
-
-    for panel in panels:
-        csv_content = fetch_table_panel_csv(panel, dashboard_uid)
-        if not csv_content:
-            continue
-
-        f = io.StringIO(csv_content)
-        reader = csv.reader(f)
-        rows = list(reader)
-        if not rows:
-            continue
-
-        # Prepend panel title column
-        header = ["Panel Title"] + rows[0]
-        data_rows = [[panel.get("title", "Panel")] + row for row in rows[1:]]
-
-        if not header_written:
-            with open(output_path, "w", newline="") as out_f:
-                writer = csv.writer(out_f)
-                writer.writerow(header)
-                writer.writerows(data_rows)
-            header_written = True
-        else:
-            with open(output_path, "a", newline="") as out_f:
-                writer = csv.writer(out_f)
-                writer.writerows(data_rows)
-
-        all_rows.extend(data_rows)
-
-    if all_rows:
-        logger.info(f"CSV saved to {output_path}")
-        return True
-    else:
-        logger.warning("No table panel data available to write.")
-        return False
-
-def send_email(dashboard_title, pdf_path, email_to, csv_path=None):
+def send_email(dashboard_title, pdf_path, email_to):
     msg = EmailMessage()
     msg["Subject"] = f"Grafana Report - {dashboard_title} - {datetime.now().strftime('%Y-%m-%d')}"
     msg["From"] = EMAIL_FROM
     msg["To"] = email_to
 
-    # Attach PDF
     with open(pdf_path, "rb") as f:
         msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{dashboard_title}.pdf")
-
-    # Attach CSV if available
-    if csv_path:
-        with open(csv_path, "rb") as f:
-            msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=f"{dashboard_title}.csv")
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -445,21 +215,64 @@ def send_email(dashboard_title, pdf_path, email_to, csv_path=None):
         logger.error(f"Failed to send email: {e}")
         raise
 
+def export_table_panel_csv(dashboard_uid, panel_id, output_path):
+    url = f"{GRAFANA_URL}/api/ds/query"
+    payload = {
+        "queries": [
+            {
+                "refId": "A",
+                "datasource": {"type": "grafana-datasource", "uid": "your-datasource-uid"},
+                "panelId": panel_id,
+            }
+        ],
+        "range": {
+            "from": TIME_FROM,
+            "to": TIME_TO
+        },
+        "format": "table"
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {GRAFANA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    r = requests.post(url, json=payload, headers=headers)
+    r.raise_for_status()
+    data = r.json()
+    
+    # Assuming data structure matches Grafana table format
+    fields = data['results']['A']['frames'][0]['fields']
+    
+    with open(output_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        # Write headers
+        writer.writerow([f['name'] for f in fields])
+        # Write rows
+        for row_idx in range(len(fields[0]['values'])):
+            writer.writerow([f['values'][row_idx] for f in fields])
+    
+    logger.info(f"Table panel {panel_id} exported to {output_path}")
+
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
-    temp_uid = None
 
+    temp_uid = None
+    csv_files = []
     try:
-        # Extract original dashboard UID
         dashboard_uid = extract_uid_from_url(dashboard_url)
 
-        # Step 1: Clone dashboard into Temp Reports folder
-        temp_uid = clone_dashboard_without_panels(dashboard_uid, excluded_titles, folder_name="Temp Reports")
+        # Fetch original dashboard title
+        url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        original_dashboard = r.json()["dashboard"]
+        original_title = original_dashboard.get("title", "Grafana Dashboard")
 
-        # Step 2: Fetch all panels
-        panels, dashboard_title = get_dashboard_panels(temp_uid)
+        # Step 1: Clone dashboard without excluded panels
+        temp_uid = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
 
-        # Step 3: Render PDF
+        # Step 2: Render full dashboard image in kiosk mode
         render_url = (
             f"{GRAFANA_URL}/render/d/{temp_uid}"
             f"?kiosk&width={A4_WIDTH_PX}&height=10000"
@@ -468,22 +281,56 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         logger.info(f"Rendering dashboard at {render_url}")
         r = requests.get(render_url, headers=headers, stream=True, timeout=60)
         r.raise_for_status()
+
         img = Image.open(io.BytesIO(r.content))
+
+        # Step 3: Paginate image to A4 pages
         pages = paginate_to_a4(img)
+        logger.info(f"Dashboard paginated into {len(pages)} pages")
+
+        # Step 4: Generate PDF from pages
         pdf_path = f"/tmp/grafana_report_{temp_uid}.pdf"
         generate_pdf_from_pages(pages, pdf_path)
 
-        # Step 4: Generate CSV for table panels
-        csv_path = f"/tmp/grafana_report_{temp_uid}.csv"
-        csv_written = generate_csv_from_table_panels(panels, temp_uid, csv_path)
-        if not csv_written:
-            csv_path = None  # Skip CSV attachment if no table data
+        # Step 5: Export table panels to CSV
+        panels, _ = get_dashboard_panels(temp_uid)
+        for panel in panels:
+            if panel["type"] == "table":
+                csv_path = f"/tmp/grafana_table_{panel['id']}.csv"
+                try:
+                    export_table_panel_csv(temp_uid, panel["id"], csv_path)
+                    csv_files.append(csv_path)
+                except Exception as e:
+                    logger.error(f"Failed to export CSV for panel {panel['id']}: {e}")
 
-        # Step 5: Send email with PDF and CSV (if any)
+        # Step 6: Send email if requested
         if email_to:
-            send_email(dashboard_title, pdf_path, email_to, csv_path)
+            msg = EmailMessage()
+            msg["Subject"] = f"Grafana Report - {original_title} - {datetime.now().strftime('%Y-%m-%d')}"
+            msg["From"] = EMAIL_FROM
+            msg["To"] = email_to
 
-        logger.info(f"Report generation completed for '{dashboard_title}'")
+            # Attach PDF
+            with open(pdf_path, "rb") as f:
+                msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename=f"{original_title}.pdf")
+
+            # Attach CSVs
+            for csv_file in csv_files:
+                with open(csv_file, "rb") as f:
+                    filename = os.path.basename(csv_file)
+                    msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=filename)
+
+            try:
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                    server.starttls()
+                    if SMTP_USERNAME and SMTP_PASSWORD:
+                        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                    server.send_message(msg)
+                logger.info(f"Email sent to {email_to}")
+            except Exception as e:
+                logger.error(f"Failed to send email: {e}")
+
+        logger.info(f"Report generation completed: PDF + {len(csv_files)} CSVs")
 
     except Exception as e:
         logger.error(f"Error during report generation: {e}")
@@ -491,6 +338,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
     finally:
         if temp_uid:
             delete_dashboard(temp_uid)
+
 
 @app.post("/generate_report/")
 async def generate_report(req: ReportRequest, background_tasks: BackgroundTasks):
