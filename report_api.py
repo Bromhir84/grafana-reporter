@@ -219,6 +219,7 @@ def send_email(dashboard_title, pdf_path, email_to):
 def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=None):
     import os
     from playwright.sync_api import sync_playwright
+
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
 
@@ -235,40 +236,41 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
         page.wait_for_timeout(8000)  # wait for dashboard to render
         logger.info("Dashboard loaded, looking for panels...")
 
-        # Updated selector for Grafana panels
-        panels = page.query_selector_all("section.css-itdw1b-panel-container")
+        # Use stable selector for panels
+        panels = page.query_selector_all("section[aria-labelledby], section[data-testid^='data-testid Panel header']")
         logger.info(f"Found {len(panels)} panels")
 
         for idx, panel in enumerate(panels, start=1):
             try:
-                panel_title_elem = panel.query_selector("h2.css-1fxx2s4")
+                # Use stable selector for panel title
+                panel_title_elem = panel.query_selector("h2[title]")
                 panel_title = panel_title_elem.inner_text().strip() if panel_title_elem else f"panel_{idx}"
                 logger.info(f"Processing panel {idx}: '{panel_title}'")
 
-                # Hover and click menu button
-                menu_btn = panel.query_selector('button[aria-label^="Menu for panel"]')
+                panel.hover()
+                menu_btn = panel.query_selector(f'button[aria-label^="Menu for panel"]')
                 if not menu_btn:
                     logger.warning(f"Panel '{panel_title}': No menu button found, skipping CSV export")
                     continue
                 menu_btn.click()
-                logger.info(f"Panel '{panel_title}': Clicked menu button")
+                logger.info(f"Panel '{panel_title}': Clicked menu")
 
                 # Click Inspect → Data
                 inspect_btn = page.locator("text=Inspect")
                 if inspect_btn.count() == 0:
                     logger.warning(f"Panel '{panel_title}': 'Inspect' button not found")
                     continue
-                inspect_btn.first.click()
+                inspect_btn.click()
                 logger.info(f"Panel '{panel_title}': Clicked 'Inspect'")
 
                 data_btn = page.locator("text=Data")
                 if data_btn.count() == 0:
                     logger.warning(f"Panel '{panel_title}': 'Data' button not found")
                     continue
-                data_btn.first.click()
+                data_btn.click()
                 logger.info(f"Panel '{panel_title}': Clicked 'Data'")
 
-                # Wait for CSV button and download
+                # Wait for CSV button
                 try:
                     page.wait_for_selector('button:has-text("Download CSV")', timeout=10000)
                     csv_button = page.locator('button:has-text("Download CSV")')
@@ -277,7 +279,7 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                         continue
 
                     with page.expect_download() as download_info:
-                        csv_button.first.click()
+                        csv_button.click()
                     download = download_info.value
 
                     safe_title = panel_title.replace(" ", "_").replace("$", "").replace("/", "_")
@@ -289,7 +291,7 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                 except Exception as e:
                     logger.error(f"Panel '{panel_title}': Error waiting for or clicking 'Download CSV': {e}")
 
-                # Go back to dashboard for next panel
+                # Go back to dashboard before next panel
                 page.goto(dashboard_url)
                 page.wait_for_timeout(2000)
 
@@ -297,6 +299,7 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                 logger.error(f"Unexpected error processing panel {idx}: {e}")
 
         browser.close()
+
     logger.info(f"CSV export finished, downloaded {len(csv_files)} files")
     return csv_files
 
