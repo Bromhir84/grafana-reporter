@@ -9,8 +9,7 @@ import time
 import img2pdf
 import requests
 from datetime import datetime
-from dateutil import relativedelta
-from dateutil.parser import parse
+from dateutil.relativedelta import relativedelta
 from email.message import EmailMessage
 import smtplib
 import pandas as pd
