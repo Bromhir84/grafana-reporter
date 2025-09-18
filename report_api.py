@@ -208,36 +208,38 @@ def list_dashboard_panels(dashboard_url, api_key=None):
     from playwright.sync_api import sync_playwright
 
     logger.info(f"Opening dashboard: {dashboard_url}")
+    panels_found = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            extra_http_headers={"Authorization": f"Bearer {api_key}"} if api_key else {}
-        )
+        context = browser.new_context(extra_http_headers={
+            "Authorization": f"Bearer {api_key}"
+        } if api_key else {})
+
         page = context.new_page()
         page.goto(dashboard_url)
-        page.wait_for_timeout(8000)  # wait for dashboard to render
+        page.wait_for_timeout(8000)  # wait for the dashboard to fully render
         logger.info("Dashboard loaded")
 
-        # Try to locate all panel titles
-        panel_headers = page.query_selector_all("h2")  # adjust selector if needed
-        found_titles = []
-        for ph in panel_headers:
-            try:
-                title = ph.inner_text().strip()
-                found_titles.append(title)
-            except Exception as e:
-                logger.warning(f"Error reading panel title: {e}")
-
-        if found_titles:
-            logger.info("Panels found on dashboard:")
-            for t in found_titles:
-                logger.info(f" - {t}")
-        else:
+        # Find all sections with panels
+        panel_sections = page.query_selector_all("section[data-panel-id]")
+        if not panel_sections:
             logger.warning("No panels found on the dashboard.")
+        else:
+            for section in panel_sections:
+                try:
+                    panel_id = section.get_attribute("data-panel-id")
+                    # Try to find the panel title inside h2 or other common header elements
+                    title_el = section.query_selector("h2, h3, .panel-title")
+                    title = title_el.inner_text().strip() if title_el else f"Panel-{panel_id}"
+                    panels_found.append({"id": panel_id, "title": title})
+                    logger.info(f"Found panel: ID={panel_id}, Title='{title}'")
+                except Exception as e:
+                    logger.warning(f"Error reading panel in section {section}: {e}")
 
         browser.close()
-        return found_titles
+
+    return panels_found
     
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
