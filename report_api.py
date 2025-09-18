@@ -218,9 +218,8 @@ def send_email(dashboard_title, pdf_path, email_to):
 
 def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=None):
     """
-    Downloads all table panels from a Grafana dashboard using Playwright.
-    Returns a list of local CSV file paths.
-    This version detects table panels by the presence of the 'Download CSV' button.
+    Downloads table panel CSVs from Grafana using Playwright.
+    Handles dynamic titles, panel menus, and transformations.
     """
     os.makedirs(output_dir, exist_ok=True)
     csv_files = []
@@ -233,17 +232,13 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
 
         page = context.new_page()
         page.goto(dashboard_url)
+        page.wait_for_timeout(8000)  # wait for dashboard to render
 
-        # Wait for dashboard to render
-        page.wait_for_timeout(8000)  # 8 seconds, adjust for complex dashboards
-
-        # Find all panel containers
         panel_elements = page.query_selector_all("div.panel-content")
 
         for idx, panel in enumerate(panel_elements, start=1):
             try:
                 panel.hover()
-
                 # Open panel menu
                 menu_button = panel.query_selector('button[aria-label="More options"]')
                 if not menu_button:
@@ -252,18 +247,17 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                 page.locator("text=Inspect").click()
                 page.locator("text=Data").click()
 
-                # Wait for Download CSV button
-                page.wait_for_timeout(1000)
+                # Wait and locate Download CSV button
+                page.wait_for_selector('button:has-text("Download CSV")', timeout=5000)
                 csv_button = page.locator('button:has-text("Download CSV")')
                 if csv_button.count() == 0:
-                    continue  # Not a table panel
+                    continue
 
-                # Intercept download
                 with page.expect_download() as download_info:
                     csv_button.click()
                 download = download_info.value
 
-                # Determine panel title safely
+                # Safe panel title
                 title_elem = panel.query_selector("div.panel-title-text")
                 panel_title = title_elem.inner_text().strip() if title_elem else f"panel_{idx}"
                 safe_title = panel_title.replace(" ", "_").replace("$", "").replace("/", "_")
@@ -271,10 +265,9 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
                 csv_path = os.path.join(output_dir, f"{safe_title}.csv")
                 download.save_as(csv_path)
                 csv_files.append(csv_path)
-
                 logger.info(f"Downloaded CSV for panel '{panel_title}' → {csv_path}")
 
-                # Go back to dashboard before next panel
+                # Back to dashboard
                 page.goto(dashboard_url)
                 page.wait_for_timeout(2000)
 
@@ -283,7 +276,6 @@ def download_table_csvs(dashboard_url, output_dir="/tmp/grafana_csvs", api_key=N
 
         browser.close()
     return csv_files
-
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
