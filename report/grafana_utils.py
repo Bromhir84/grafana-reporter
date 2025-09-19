@@ -28,7 +28,7 @@ def filter_panels(panels, excluded_titles_lower):
     return filtered
 
 
-def clone_dashboard_without_panels(dashboard_uid, excluded_titles=None):
+def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, return_json=False):
     excluded_titles = excluded_titles or []
     excluded_titles_lower = [t.strip().lower() for t in excluded_titles]
 
@@ -58,7 +58,8 @@ def clone_dashboard_without_panels(dashboard_uid, excluded_titles=None):
     put_url = f"{GRAFANA_URL}/api/dashboards/db"
     r = requests.post(put_url, headers=headers, json=payload)
     r.raise_for_status()
-
+    if return_json:
+        return temp_uid, table_panels, GRAFANA_VARS, dash
     return temp_uid, table_panels, GRAFANA_VARS
 
 

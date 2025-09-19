@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
-import pytz
 import os
+import pytz
 from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV
 from .grafana_utils import clone_dashboard_without_panels, delete_dashboard, paginate_to_a4, generate_pdf_from_pages
 from .prometheus_utils import (
@@ -18,21 +18,37 @@ import io
 import pandas as pd
 
 logger = logging.getLogger(__name__)
-tz = pytz.timezone("Europe/Amsterdam")  # or whatever Grafana uses
+
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
-    temp_uid, csv_files, pdf_path = None, [], None
+    temp_uid, csv_files, pdf_path, dashboard_tz = None, [], None, None
 
     try:
+        # --- Clone dashboard and extract timezone ---
         dashboard_uid = extract_uid_from_url(dashboard_url)
-        temp_uid, table_panels, GRAFANA_VARS = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
+        temp_uid, table_panels, GRAFANA_VARS, dash_json = clone_dashboard_without_panels(
+            dashboard_uid, excluded_titles, return_json=True  # update utils for this
+        )
 
+        dashboard_tz = dash_json.get("timezone", "UTC")
+        logger.info(f"Dashboard timezone = {dashboard_tz}")
+
+        # --- Compute range ---
         start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
-        start_dt = start_dt.astimezone(tz)
-        end_dt = end_dt.astimezone(tz)
-        logger.info(f"Querying Prometheus from {start_dt} to {end_dt}")
 
+        # Localize if timezone is not "browser"
+        if dashboard_tz and dashboard_tz.lower() != "browser":
+            try:
+                tz = pytz.timezone(dashboard_tz)
+                start_dt = start_dt.astimezone(tz)
+                end_dt = end_dt.astimezone(tz)
+            except Exception:
+                logger.warning(f"Invalid timezone {dashboard_tz}, falling back to UTC")
+
+        logger.info(f"Querying Prometheus from {start_dt} to {end_dt} ({dashboard_tz})")
+
+        # --- Loop panels ---
         for panel in table_panels:
             logger.info(f"Rebuilding table panel: {panel['title']}")
             panel_df = None
@@ -72,7 +88,11 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 logger.warning(f"No data for panel '{panel['title']}'")
 
         # --- Render dashboard as PDF ---
-        render_url = f"{os.getenv('GRAFANA_URL')}/render/d/{temp_uid}?kiosk&width=2480&height=10000&theme=light&tz=UTC&from={TIME_FROM}&to={TIME_TO}"
+        render_url = (
+            f"{os.getenv('GRAFANA_URL')}/render/d/{temp_uid}"
+            f"?kiosk&width=2480&height=10000&theme=light"
+            f"&tz={dashboard_tz}&from={TIME_FROM}&to={TIME_TO}"
+        )
         logger.info(f"Rendering dashboard at {render_url}")
 
         import requests
