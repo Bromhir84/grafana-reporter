@@ -1,11 +1,25 @@
-import requests, time, copy
-from ..config import GRAFANA_URL, HEADERS
-from .prometheus_utils import extract_grafana_vars
+import requests
+import time
+import logging
+from PIL import Image
+from ..config import GRAFANA_URL, GRAFANA_API_KEY, A4_WIDTH_PX, A4_HEIGHT_PX, A4_BG_COLOR
+
+logger = logging.getLogger(__name__)
+headers = {"Authorization": f"Bearer {GRAFANA_API_KEY}"}
+
+
+def extract_grafana_vars(dashboard_json):
+    vars_dict = {}
+    for v in dashboard_json.get("templating", {}).get("list", []):
+        value = v.get("current", {}).get("value", ".*")
+        vars_dict[v["name"]] = str(value)
+    return vars_dict
+
 
 def filter_panels(panels, excluded_titles_lower):
     filtered = []
     for panel in panels:
-        new_panel = copy.deepcopy(panel)
+        new_panel = panel.copy()
         if "panels" in panel:
             new_panel["panels"] = filter_panels(panel["panels"], excluded_titles_lower)
         title = panel.get("title", "").strip().lower()
@@ -13,9 +27,13 @@ def filter_panels(panels, excluded_titles_lower):
             filtered.append(new_panel)
     return filtered
 
-def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles_lower):
+
+def clone_dashboard_without_panels(dashboard_uid, excluded_titles=None):
+    excluded_titles = excluded_titles or []
+    excluded_titles_lower = [t.strip().lower() for t in excluded_titles]
+
     url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
-    r = requests.get(url, headers=HEADERS)
+    r = requests.get(url, headers=headers)
     r.raise_for_status()
     dash = r.json()["dashboard"]
 
@@ -38,25 +56,20 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles_lower):
 
     payload = {"dashboard": dash, "overwrite": True}
     put_url = f"{GRAFANA_URL}/api/dashboards/db"
-    r = requests.post(put_url, headers=HEADERS, json=payload)
+    r = requests.post(put_url, headers=headers, json=payload)
     r.raise_for_status()
 
     return temp_uid, table_panels, GRAFANA_VARS
 
+
 def delete_dashboard(uid):
     url = f"{GRAFANA_URL}/api/dashboards/uid/{uid}"
-    try:
-        r = requests.delete(url, headers=HEADERS)
-        r.raise_for_status()
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"Failed to delete dashboard {uid}: {e}")
+    r = requests.delete(url, headers=headers)
+    if r.status_code == 200:
+        logger.info(f"Deleted temporary dashboard {uid}")
+    else:
+        logger.warning(f"Could not delete dashboard {uid}: {r.text}")
 
-def extract_uid_from_url(url: str) -> str:
-    match = re.search(r"/d/([^/]+)/", url)
-    if match:
-        return match.group(1)
-    raise ValueError("Invalid dashboard URL format. Expected /d/<uid>/")
 
 def paginate_to_a4(img: Image.Image):
     pages = []
@@ -65,27 +78,16 @@ def paginate_to_a4(img: Image.Image):
         page = Image.new("RGB", (A4_WIDTH_PX, A4_HEIGHT_PX), A4_BG_COLOR)
         crop = img.crop((0, y_offset, A4_WIDTH_PX, min(y_offset + A4_HEIGHT_PX, img.height)))
         page.paste(crop, (0, 0))
+        import io
         buf = io.BytesIO()
         page.save(buf, format="JPEG", quality=95)
         pages.append(buf.getvalue())
         y_offset += A4_HEIGHT_PX
     return pages
 
+
 def generate_pdf_from_pages(pages, output_path):
+    import img2pdf
     with open(output_path, "wb") as f:
         f.write(img2pdf.convert(pages))
     logger.info(f"PDF saved to {output_path}")
-
-def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime) -> str:
-    """Replace Grafana template variables with Prometheus-compatible values."""
-    for var, value in variables.items():
-        # Convert Grafana's $__all into regex match-all
-        if not value or value in ("$__all", "['$__all']"):
-            value = ".*"
-        query = query.replace(f"${var}", value)
-        query = query.replace(f"${{{var}}}", value)
-    
-    # Replace $__range with the correct duration
-    query = query.replace("$__range", compute_prometheus_duration(start, end))
-    
-    return query

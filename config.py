@@ -16,6 +16,3 @@ A4_HEIGHT_PX = 3508
 A4_BG_COLOR = "white"
 
 EXCLUDED_TITLES = ["Report Button", "Another panel"]
-EXCLUDED_TITLES_LOWER = [t.strip().lower() for t in EXCLUDED_TITLES]
-
-HEADERS = {"Authorization": f"Bearer {GRAFANA_API_KEY}"}
