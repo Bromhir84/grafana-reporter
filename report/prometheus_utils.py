@@ -103,10 +103,12 @@ def extract_metric(expr: str) -> str:
 
 
 def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int = 3600):
+    start_utc = start.astimezone(pytz.utc)
+    end_utc = end.astimezone(pytz.utc)
     params = {
         "query": expr,
-        "start": int(start.timestamp()),
-        "end": int(end.timestamp()),
+        "start": int(start_utc.timestamp()),
+        "end": int(end_utc.timestamp()),
         "step": step
     }
     resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query_range", params=params, timeout=60)
