@@ -18,7 +18,7 @@ import io
 import pandas as pd
 
 logger = logging.getLogger(__name__)
-tz = pytz.timezone("UTC")  # or whatever Grafana uses
+tz = pytz.timezone("Europe/Amsterdam")  # or whatever Grafana uses
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
