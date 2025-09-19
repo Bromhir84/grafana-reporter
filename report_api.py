@@ -382,25 +382,28 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 rows = []
                 for r in results.get("data", {}).get("result", []):
-                    project = r.get("metric", {}).get("project", "unknown")
+                    metric_labels = r.get("metric", {})
+                    key = metric_labels.get("project") or metric_labels.get("department") or "unknown"
+
                     if r.get("values"):
                         # take last datapoint
                         _, value = r["values"][-1]
-                        rows.append({"project": project, metric_name: float(value)})
+                        rows.append({"key": key, metric_name: float(value)})
 
                 if rows:
                     df = pd.DataFrame(rows)
-                    # merge on project, keep all metrics in same row
-                    panel_df = df if panel_df is None else pd.merge(panel_df, df, on="project", how="outer")
+                    panel_df = df if panel_df is None else pd.merge(panel_df, df, on="key", how="outer")
 
             if panel_df is not None and not panel_df.empty:
-                panel_df = panel_df.fillna(0)  # 👈 replace NaN with 0
+                panel_df = panel_df.fillna(0)
+                panel_df.rename(columns={"key": "project_or_department"}, inplace=True)
                 csv_path = f"/tmp/{panel['title'].replace(' ', '_')}.csv"
                 panel_df.to_csv(csv_path, index=False)
                 csv_files.append(csv_path)
                 logger.info(f"CSV saved for panel '{panel['title']}': {csv_path}")
             else:
                 logger.warning(f"No data for panel '{panel['title']}'")
+                
                 
         # --- Step 3: Render dashboard as PDF ---
         render_url = (
