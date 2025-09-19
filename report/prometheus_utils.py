@@ -4,7 +4,7 @@ from datetime import datetime
 _METRIC_REGEX = re.compile(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(?:[{(])')
 _PER_SUFFIX_REGEX = re.compile(r'_per_[a-zA-Z0-9]+$')
 
-from .config import PROMETHEUS_URL
+from ..config import PROMETHEUS_URL
 
 def extract_grafana_vars(dashboard_json):
     return {v["name"]: str(v.get("current", {}).get("value", ".*"))
