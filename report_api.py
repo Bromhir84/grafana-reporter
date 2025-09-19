@@ -361,47 +361,47 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
         for panel in table_panels:
             logger.info(f"Rebuilding table panel: {panel['title']}")
-            combined_df = None
 
-            # Compute start/end from env
             start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
+            panel_df = None
 
             for expr in panel["queries"]:
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
                 metric_name = extract_metric(expr_resolved)
                 range_seconds = int((end_dt - start_dt).total_seconds())
-                logger.info(f"Querying Prometheus for panel '{panel['title']}':\n{expr_resolved}\nStart: {start_dt}, End: {end_dt}")
-            
+                logger.info(
+                    f"Querying Prometheus for panel '{panel['title']}':\n{expr_resolved}\n"
+                    f"Start: {start_dt}, End: {end_dt}"
+                )
 
                 try:
                     results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt, step=range_seconds)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
-            
+
                 rows = []
                 for r in results.get("data", {}).get("result", []):
-                    metric = r.get("metric", {})
-                    for timestamp, value in r.get("values", []):  # [timestamp, value]
-                        rows.append({
-                            **metric,
-                            "timestamp": datetime.utcfromtimestamp(timestamp),
-                            "value": float(value),
-                            "metric_name": metric_name  # 👈 add metric name column
-                        })
+                    project = r.get("metric", {}).get("project", "unknown")
+                    if r.get("values"):
+                        # take last datapoint
+                        _, value = r["values"][-1]
+                        rows.append({"project": project, metric_name: float(value)})
 
                 if rows:
                     df = pd.DataFrame(rows)
-                    combined_df = df if combined_df is None else pd.concat([combined_df, df], ignore_index=True)
+                    # merge on project, keep all metrics in same row
+                    panel_df = df if panel_df is None else pd.merge(panel_df, df, on="project", how="outer")
 
-            if combined_df is not None and not combined_df.empty:
+            if panel_df is not None and not panel_df.empty:
+                panel_df = panel_df.fillna(0)  # 👈 replace NaN with 0
                 csv_path = f"/tmp/{panel['title'].replace(' ', '_')}.csv"
-                combined_df.to_csv(csv_path, index=False)
+                panel_df.to_csv(csv_path, index=False)
                 csv_files.append(csv_path)
                 logger.info(f"CSV saved for panel '{panel['title']}': {csv_path}")
             else:
                 logger.warning(f"No data for panel '{panel['title']}'")
-
+                
         # --- Step 3: Render dashboard as PDF ---
         render_url = (
             f"{GRAFANA_URL}/render/d/{temp_uid}"
