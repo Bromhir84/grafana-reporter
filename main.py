@@ -1,7 +1,7 @@
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from .config import EXCLUDED_TITLES
-from .report import process_report
+from .report.report import process_report
 
 app = FastAPI(root_path="/report")
 
