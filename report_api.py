@@ -135,29 +135,24 @@ def extract_uid_from_url(url: str) -> str:
 
 def filter_panels(panels, excluded_titles_lower):
     filtered = []
-    for panel in panels:
-        title = panel.get("title", "").strip().lower()
-        if "panels" in panel:
-            panel["panels"] = filter_panels(panel["panels"], excluded_titles_lower)
-        if title not in excluded_titles_lower:
-            filtered.append(panel)
-    return filtered
 
-def extract_table_panels(dashboard_data):
-    """Return list of (title, queries) for all table panels in a dashboard."""
-    tables = []
-    def walk_panels(panels):
-        for panel in panels:
-            if panel.get("type") == "table":
-                queries = [t["expr"] for t in panel.get("targets", []) if "expr" in t]
-                tables.append({"title": panel.get("title", "Untitled Table"), "queries": queries})
-            if "panels" in panel:  # nested rows
-                walk_panels(panel["panels"])
-    walk_panels(dashboard_data.get("panels", []))
-    return tables
+    for panel in panels:
+        # Recursively filter nested panels
+        new_panel = panel.copy()
+        if "panels" in panel:
+            new_panel["panels"] = filter_panels(panel["panels"], excluded_titles_lower)
+
+        # Include panel only if its title is not excluded
+        title = panel.get("title", "").strip().lower()
+        if title not in excluded_titles_lower:
+            filtered.append(new_panel)
+
+    return filtered
 
 def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None):
     excluded_titles = excluded_titles or []
+    excluded_titles_lower = [t.strip().lower() for t in excluded_titles]
+
     url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
@@ -165,6 +160,10 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None):
     dash = r.json()["dashboard"]
     GRAFANA_VARS = extract_grafana_vars(dash)
 
+    # --- Step 1: Filter out excluded panels ---
+    dash["panels"] = filter_panels(dash.get("panels", []), excluded_titles_lower)
+
+    # --- Step 2: Extract table panels after filtering ---
     table_panels = []
     for panel in dash.get("panels", []):
         if panel.get("type") == "table":
@@ -174,7 +173,7 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None):
                     exprs.append(target["expr"])
             table_panels.append({"title": panel.get("title"), "queries": exprs})
 
-    # clone dashboard logic stays the same...
+    # --- Step 3: Create temp dashboard ---
     temp_uid = f"{dashboard_uid}-temp-{int(time.time())}"
     dash["uid"] = temp_uid
     dash["title"] = f"{dash['title']} (Temp Copy)"
@@ -212,52 +211,6 @@ def generate_pdf_from_pages(pages, output_path):
         f.write(img2pdf.convert(pages))
     logger.info(f"PDF saved to {output_path}")
 
-def list_dashboard_panels(dashboard_url, api_key=None):
-    """
-    Open the original dashboard in Playwright and print all panel titles.
-    Returns a list of panel titles.
-    """
-    from playwright.sync_api import sync_playwright
-
-    logger.info(f"Opening original dashboard: {dashboard_url}")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(extra_http_headers={
-            "Authorization": f"Bearer {api_key}"
-        } if api_key else {})
-
-        page = context.new_page()
-        page.goto(dashboard_url)
-        page.wait_for_timeout(8000)  # Wait for dashboard to fully render
-        logger.info("Dashboard loaded")
-
-        # Attempt to locate all panel titles robustly
-        panel_titles = set()
-        for panel_div in page.query_selector_all("div[role='region'], div[data-panelid]"):
-            try:
-                # Try h2 inside panel
-                h2 = panel_div.query_selector("h2")
-                if h2:
-                    panel_titles.add(h2.inner_text().strip())
-                else:
-                    # Fallback: look for any child with text content
-                    text = panel_div.inner_text().strip()
-                    if text:
-                        panel_titles.add(text.split("\n")[0])  # take first line
-            except Exception:
-                continue
-
-        if panel_titles:
-            logger.info("Panels found on original dashboard:")
-            for t in panel_titles:
-                logger.info(f" - {t}")
-        else:
-            logger.warning("No panels found on the original dashboard.")
-
-        browser.close()
-        return list(panel_titles)
-
 def extract_grafana_vars(dashboard_json):
     vars_dict = {}
     for v in dashboard_json.get("templating", {}).get("list", []):
@@ -279,15 +232,6 @@ def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: date
     query = query.replace("$__range", compute_prometheus_duration(start, end))
     
     return query
-
-def query_prometheus(expr: str):
-    resp = requests.get(
-        f"{PROMETHEUS_URL}/api/v1/query",
-        params={"query": expr},
-        timeout=30
-    )
-    resp.raise_for_status()
-    return resp.json()
 
 def extract_metric(expr: str) -> str:
     """
@@ -329,15 +273,6 @@ def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int 
     resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query_range", params=params, timeout=60)
     resp.raise_for_status()
     return resp.json()
-
-def save_prometheus_results_to_csv(results: dict, csv_path: str):
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["metric", "value"])
-        for item in results.get("data", {}).get("result", []):
-            metric = ",".join([f"{k}={v}" for k, v in item["metric"].items()])
-            value = item["value"][1] if "value" in item else None
-            writer.writerow([metric, value])
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     """
@@ -403,7 +338,6 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 logger.info(f"CSV saved for panel '{panel['title']}': {csv_path}")
             else:
                 logger.warning(f"No data for panel '{panel['title']}'")
-                
                 
         # --- Step 3: Render dashboard as PDF ---
         render_url = (
