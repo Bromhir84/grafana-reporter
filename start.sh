@@ -11,4 +11,4 @@ echo "Starting server..."
 cd /app/repo
 
 # Start uvicorn as the main process
-exec uvicorn main:app --host 0.0.0.0 --port 8000
+exec uvicorn repo.main:app --host 0.0.0.0 --port 8000
