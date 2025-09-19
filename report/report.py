@@ -13,6 +13,7 @@ from .prometheus_utils import (
 )
 from .email_utils import send_email
 
+import re
 from PIL import Image
 import io
 import pandas as pd
