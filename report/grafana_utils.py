@@ -1,5 +1,5 @@
 import requests, time, copy
-from .config import GRAFANA_URL, HEADERS
+from ..config import GRAFANA_URL, HEADERS
 from .prometheus_utils import extract_grafana_vars
 
 def filter_panels(panels, excluded_titles_lower):

@@ -1,7 +1,7 @@
 import io
 from PIL import Image
 import img2pdf
-from .config import A4_WIDTH_PX, A4_HEIGHT_PX, A4_BG_COLOR
+from ..config import A4_WIDTH_PX, A4_HEIGHT_PX, A4_BG_COLOR
 
 def paginate_to_a4(img: Image.Image):
     pages = []

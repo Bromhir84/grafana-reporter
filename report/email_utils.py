@@ -1,7 +1,7 @@
 import smtplib
 import os
 from email.message import EmailMessage
-from .config import SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM
+from ..config import SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM
 
 def send_email(to_email, pdf_path=None, csv_files=None, subject="Grafana Report"):
     msg = EmailMessage()
