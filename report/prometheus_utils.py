@@ -37,3 +37,9 @@ def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int 
     r = requests.get(f"{PROMETHEUS_URL}/api/v1/query_range", params=params, timeout=60)
     r.raise_for_status()
     return r.json()
+
+def compute_range_from_env(time_from: str, time_to: str):
+    """Return start and end datetime based on TIME_FROM and TIME_TO."""
+    start = parse_grafana_time(time_from)
+    end = parse_grafana_time(time_to)
+    return start, end

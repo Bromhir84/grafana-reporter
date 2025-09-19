@@ -16,7 +16,6 @@ from .grafana_utils import (
     delete_dashboard,
     paginate_to_a4,
     generate_pdf_from_pages,
-    extract_grafana_vars,
     resolve_grafana_vars,
 )
 from .prometheus_utils import (

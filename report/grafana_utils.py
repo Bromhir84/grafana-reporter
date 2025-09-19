@@ -51,3 +51,41 @@ def delete_dashboard(uid):
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning(f"Failed to delete dashboard {uid}: {e}")
+
+def extract_uid_from_url(url: str) -> str:
+    match = re.search(r"/d/([^/]+)/", url)
+    if match:
+        return match.group(1)
+    raise ValueError("Invalid dashboard URL format. Expected /d/<uid>/")
+
+def paginate_to_a4(img: Image.Image):
+    pages = []
+    y_offset = 0
+    while y_offset < img.height:
+        page = Image.new("RGB", (A4_WIDTH_PX, A4_HEIGHT_PX), A4_BG_COLOR)
+        crop = img.crop((0, y_offset, A4_WIDTH_PX, min(y_offset + A4_HEIGHT_PX, img.height)))
+        page.paste(crop, (0, 0))
+        buf = io.BytesIO()
+        page.save(buf, format="JPEG", quality=95)
+        pages.append(buf.getvalue())
+        y_offset += A4_HEIGHT_PX
+    return pages
+
+def generate_pdf_from_pages(pages, output_path):
+    with open(output_path, "wb") as f:
+        f.write(img2pdf.convert(pages))
+    logger.info(f"PDF saved to {output_path}")
+
+def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime) -> str:
+    """Replace Grafana template variables with Prometheus-compatible values."""
+    for var, value in variables.items():
+        # Convert Grafana's $__all into regex match-all
+        if not value or value in ("$__all", "['$__all']"):
+            value = ".*"
+        query = query.replace(f"${var}", value)
+        query = query.replace(f"${{{var}}}", value)
+    
+    # Replace $__range with the correct duration
+    query = query.replace("$__range", compute_prometheus_duration(start, end))
+    
+    return query
