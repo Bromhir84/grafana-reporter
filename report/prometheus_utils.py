@@ -20,9 +20,36 @@ def parse_grafana_time(time_str: str) -> datetime:
 
     if time_str == "now":
         return now
-    ...
-    # keep same logic as before
-    ...
+    m = re.match(r"now-(\d+)([smhdwM])", time_str)
+    if m:
+        value, unit = m.groups()
+        value = int(value)
+        if unit == "s":
+            dt = now - relativedelta(seconds=value)
+        elif unit == "m":
+            dt = now - relativedelta(minutes=value)
+        elif unit == "h":
+            dt = now - relativedelta(hours=value)
+        elif unit == "d":
+            dt = now - relativedelta(days=value)
+        elif unit == "w":
+            dt = now - relativedelta(weeks=value)
+        elif unit == "M":
+            dt = now - relativedelta(months=value)
+        else:
+            dt = now
+    else:
+        dt = now
+
+    if time_str.endswith("/M"):
+        dt = dt.replace(day=1, hour=0, minute=0, second=0)
+    elif time_str.endswith("/d"):
+        dt = dt.replace(hour=0, minute=0, second=0)
+    elif time_str.endswith("/w"):
+        dt = dt - relativedelta(days=dt.weekday())
+        dt = dt.replace(hour=0, minute=0, second=0)
+
+    return dt
 
 def compute_range_from_env(time_from: str, time_to: str):
     """Return start and end datetime based on TIME_FROM and TIME_TO (CEST-aware)."""
