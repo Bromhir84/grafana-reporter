@@ -153,27 +153,30 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None):
     excluded_titles = excluded_titles or []
     excluded_titles_lower = [t.strip().lower() for t in excluded_titles]
 
+    # Fetch original dashboard
     url = f"{GRAFANA_URL}/api/dashboards/uid/{dashboard_uid}"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
-
     dash = r.json()["dashboard"]
+
+    # Extract dashboard template variables
     GRAFANA_VARS = extract_grafana_vars(dash)
 
-    # --- Step 1: Filter out excluded panels ---
+    # --- Step 1: Filter out excluded panels recursively ---
     dash["panels"] = filter_panels(dash.get("panels", []), excluded_titles_lower)
 
     # --- Step 2: Extract table panels after filtering ---
     table_panels = []
-    for panel in dash.get("panels", []):
-        if panel.get("type") == "table":
-            exprs = []
-            for target in panel.get("targets", []):
-                if "expr" in target:
-                    exprs.append(target["expr"])
-            table_panels.append({"title": panel.get("title"), "queries": exprs})
+    def walk_panels(panels):
+        for panel in panels:
+            if panel.get("type") == "table":
+                exprs = [t["expr"] for t in panel.get("targets", []) if "expr" in t]
+                table_panels.append({"title": panel.get("title"), "queries": exprs})
+            if "panels" in panel:
+                walk_panels(panel["panels"])
+    walk_panels(dash.get("panels", []))
 
-    # --- Step 3: Create temp dashboard ---
+    # --- Step 3: Create a temporary dashboard ---
     temp_uid = f"{dashboard_uid}-temp-{int(time.time())}"
     dash["uid"] = temp_uid
     dash["title"] = f"{dash['title']} (Temp Copy)"
