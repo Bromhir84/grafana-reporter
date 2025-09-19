@@ -290,9 +290,30 @@ def query_prometheus(expr: str):
     return resp.json()
 
 def extract_metric(expr: str) -> str:
-    """Extract first Prometheus metric name from query string."""
-    match = re.search(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\s*[{(]', expr)
-    return match.group(1) if match else "unknown_metric"
+    """
+    Extract the first Prometheus metric name from a query string,
+    skipping PromQL functions like sum(), rate(), avg(), etc.
+    """
+    # Find all candidate tokens that look like metric names
+    matches = re.findall(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(?:[{(])', expr)
+
+    if not matches:
+        return "unknown_metric"
+
+    # List of common PromQL function names to skip
+    promql_functions = {
+        "sum", "avg", "min", "max", "count", "stddev", "stdvar",
+        "rate", "irate", "increase", "delta", "idelta",
+        "sum_over_time", "avg_over_time", "min_over_time", "max_over_time",
+        "quantile_over_time", "count_over_time", "last_over_time"
+    }
+
+    # Return the first non-function token
+    for token in matches:
+        if token not in promql_functions:
+            return token
+
+    return "unknown_metric"
 
 def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int = 3600):
     """
