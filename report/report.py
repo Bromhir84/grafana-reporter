@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+import pytz
 import os
 from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV
 from .grafana_utils import clone_dashboard_without_panels, delete_dashboard, paginate_to_a4, generate_pdf_from_pages
@@ -17,6 +18,7 @@ import io
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+tz = pytz.timezone("Europe/Amsterdam")  # or whatever Grafana uses
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
@@ -27,6 +29,8 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         temp_uid, table_panels, GRAFANA_VARS = clone_dashboard_without_panels(dashboard_uid, excluded_titles)
 
         start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
+        start_dt = start_dt.astimezone(tz)
+        end_dt = end_dt.astimezone(tz)
         logger.info(f"Querying Prometheus from {start_dt} to {end_dt}")
 
         for panel in table_panels:
