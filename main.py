@@ -5,6 +5,13 @@ from .config import EXCLUDED_TITLES
 from .report.report import process_report
 
 import os
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,  # or DEBUG if you want more details
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 app = FastAPI(root_path=os.getenv("ROOT_PATH", "/report"))
 
