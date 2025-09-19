@@ -3,6 +3,9 @@ import requests
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from ..config import PROMETHEUS_URL
+import pytz
+
+CET_TZ = pytz.timezone("Europe/Amsterdam")
 
 def parse_grafana_time(time_str: str) -> datetime:
     now = datetime.utcnow().replace(microsecond=0)
@@ -43,6 +46,18 @@ def parse_grafana_time(time_str: str) -> datetime:
 def compute_range_from_env(time_from: str, time_to: str):
     start = parse_grafana_time(time_from)
     end = parse_grafana_time(time_to)
+
+    # Convert naive UTC datetimes to Europe/Amsterdam
+    if start.tzinfo is None:
+        start = pytz.utc.localize(start).astimezone(CET_TZ)
+    else:
+        start = start.astimezone(CET_TZ)
+
+    if end.tzinfo is None:
+        end = pytz.utc.localize(end).astimezone(CET_TZ)
+    else:
+        end = end.astimezone(CET_TZ)
+
     return start, end
 
 

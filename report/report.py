@@ -36,17 +36,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
         # --- Compute range ---
         start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
-
-        # Localize if timezone is not "browser"
-        if dashboard_tz and dashboard_tz.lower() != "browser":
-            try:
-                tz = pytz.timezone(dashboard_tz)
-                start_dt = start_dt.astimezone(tz)
-                end_dt = end_dt.astimezone(tz)
-            except Exception:
-                logger.warning(f"Invalid timezone {dashboard_tz}, falling back to UTC")
-
-        logger.info(f"Querying Prometheus from {start_dt} to {end_dt} ({dashboard_tz})")
+        logger.info(f"Querying Prometheus from {start_dt} to {end_dt}")
 
         # --- Loop panels ---
         for panel in table_panels:
@@ -91,7 +81,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         render_url = (
             f"{os.getenv('GRAFANA_URL')}/render/d/{temp_uid}"
             f"?kiosk&width=2480&height=10000&theme=light"
-            f"&tz={dashboard_tz}&from={TIME_FROM}&to={TIME_TO}"
+            f"&tz=Europe/Amsterdam&from={TIME_FROM}&to={TIME_TO}"
         )
         logger.info(f"Rendering dashboard at {render_url}")
 
