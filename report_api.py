@@ -240,6 +240,7 @@ def extract_metric(expr: str) -> str:
     """
     Extract the first Prometheus metric name from a query string,
     skipping PromQL functions like sum(), rate(), avg(), etc.
+    Also removes any suffix after a ':' in the metric name.
     """
     # Find all candidate tokens that look like metric names
     matches = re.findall(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(?:[{(])', expr)
@@ -255,10 +256,10 @@ def extract_metric(expr: str) -> str:
         "quantile_over_time", "count_over_time", "last_over_time"
     }
 
-    # Return the first non-function token
+    # Return the first non-function token, stripping anything after ':'
     for token in matches:
         if token not in promql_functions:
-            return token
+            return token.split(":")[0]
 
     return "unknown_metric"
 
