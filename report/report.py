@@ -70,7 +70,9 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
                 panel_df.rename(columns={"key": "project_or_department"}, inplace=True)
-                csv_path = f"/tmp/{panel['title'].replace(' ', '_')}.csv"
+                safe_title = re.sub(r'[^A-Za-z0-9_\-]', '_', panel['title'])  # replace non-safe chars
+                csv_path = os.path.join("/tmp", f"{safe_title}.csv")
+                os.makedirs(os.path.dirname(csv_path), exist_ok=True) 
                 panel_df.to_csv(csv_path, index=False)
                 csv_files.append(csv_path)
                 logger.info(f"CSV saved for panel '{panel['title']}': {csv_path}")
