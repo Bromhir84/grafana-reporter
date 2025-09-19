@@ -289,6 +289,11 @@ def query_prometheus(expr: str):
     resp.raise_for_status()
     return resp.json()
 
+def extract_metric(expr: str) -> str:
+    """Extract first Prometheus metric name from query string."""
+    match = re.search(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\s*[{(]', expr)
+    return match.group(1) if match else "unknown_metric"
+
 def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int = 3600):
     """
     Query Prometheus over a fixed time range.
@@ -342,6 +347,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
             for expr in panel["queries"]:
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
+                metric_name = extract_metric(expr_resolved)
                 range_seconds = int((end_dt - start_dt).total_seconds())
                 logger.info(f"Querying Prometheus for panel '{panel['title']}':\n{expr_resolved}\nStart: {start_dt}, End: {end_dt}")
             
@@ -351,13 +357,17 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
-
+            
                 rows = []
                 for r in results.get("data", {}).get("result", []):
                     metric = r.get("metric", {})
-                    for value_pair in r.get("values", []):  # [timestamp, value]
-                        timestamp, value = value_pair
-                        rows.append({**metric, "timestamp": datetime.utcfromtimestamp(timestamp), "value": float(value)})
+                    for timestamp, value in r.get("values", []):  # [timestamp, value]
+                        rows.append({
+                            **metric,
+                            "timestamp": datetime.utcfromtimestamp(timestamp),
+                            "value": float(value),
+                            "metric_name": metric_name  # 👈 add metric name column
+                        })
 
                 if rows:
                     df = pd.DataFrame(rows)
