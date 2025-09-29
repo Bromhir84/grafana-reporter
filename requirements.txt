@@ -6,3 +6,4 @@ pillow
 img2pdf
 requests
 pandas
+yaml
