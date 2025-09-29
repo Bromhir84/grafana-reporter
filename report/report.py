@@ -12,6 +12,7 @@ from .prometheus_utils import (
     extract_metric
 )
 from .email_utils import send_email
+from .recording_rule_backfill import RecordingRuleBackfill
 
 import re
 from PIL import Image
@@ -20,6 +21,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Initialize recording rule backfiller
+backfiller = RecordingRuleBackfill("runai.yaml")
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
@@ -75,16 +78,41 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 # If the query returned no results, create zeros for all known projects/departments
                 if not rows:
-                    known_keys = (
-                        panel_df[["project", "department"]].drop_duplicates().to_dict("records")
-                        if panel_df is not None else [{"project": "unknown", "department": "unknown"}]
+                    # Attempt to backfill from recording rule YAML
+                    backfill_results = backfiller.backfill_rule(
+                        record_name=expr_resolved,
+                        start=start_dt,
+                        end=end_dt,
+                        step=range_seconds
                     )
-                    for k in known_keys:
-                        rows.append({
-                            "project": k["project"],
-                            "department": k["department"],
-                            metric_name: 0.0
-                        })
+
+                    results_list = backfill_results.get("data", {}).get("result", [])
+
+                    if results_list:
+                        for r in results_list:
+                            metric_labels = r.get("metric", {})
+                            project = metric_labels.get("project", "unknown")
+                            department = metric_labels.get("department", "unknown")
+
+                            if r.get("values"):
+                                _, value = r["values"][-1]
+                                rows.append({
+                                    "project": project,
+                                    "department": department,
+                                    metric_name: float(value)
+                                })
+                    else:
+                        # Fallback to zeros if even backfill returns nothing
+                        known_keys = (
+                            panel_df[["project", "department"]].drop_duplicates().to_dict("records")
+                            if panel_df is not None else [{"project": "unknown", "department": "unknown"}]
+                        )
+                        for k in known_keys:
+                            rows.append({
+                                "project": k["project"],
+                                "department": k["department"],
+                                metric_name: 0.0
+                            })
 
                 # Convert rows to DataFrame
                 df = pd.DataFrame(rows)
