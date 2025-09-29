@@ -5,6 +5,7 @@ import os
 import pandas as pd
 from datetime import datetime
 from .prometheus_utils import query_prometheus_range
+from collections import defaultdict, deque
 
 logger = logging.getLogger(__name__)
 
