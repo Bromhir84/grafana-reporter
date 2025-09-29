@@ -66,17 +66,14 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 # --- Backfill if Prometheus returned empty ---
                 if not results_list:
-                    # Extract all token-like names from the PromQL
                     promql_tokens = re.findall(r"[a-zA-Z0-9_:]+", expr_resolved)
-                    # Only keep those that exist as recording rules
                     found_rules = [tok for tok in promql_tokens if tok in backfiller.rules_map]
 
                     if found_rules:
-                        # Use the first matching recording rule
                         found_rule = found_rules[0]
-                        logger.info(f"Detected recording rule in PromQL: {found_rule}, attempting backfill")
+                        logger.info(f"Detected recording rule in PromQL: {found_rule}, attempting recursive backfill")
 
-                        results = backfiller.backfill_rule(
+                        results = backfiller.backfill_rule_recursive(
                             record_name=found_rule,
                             start=start_dt,
                             end=end_dt,
@@ -86,7 +83,6 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                     if not results_list:
                         logger.warning(f"Backfill returned no data for {expr_resolved}")
-
 
                 # --- Convert results to rows ---
                 for r in results_list:

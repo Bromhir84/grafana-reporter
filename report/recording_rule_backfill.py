@@ -100,3 +100,36 @@ class RecordingRuleBackfill:
             # Return zero values if nothing exists
             rows.append({"project": "unknown", "department": "unknown", column_name: 0.0})
         return pd.DataFrame(rows)
+    
+    def backfill_rule_recursive(self, record_name, start, end, step, visited=None):
+        """
+        Backfill a recording rule and its dependencies recursively.
+        """
+        if visited is None:
+            visited = set()
+
+        if record_name in visited:
+            # Prevent infinite loops
+            logger.warning(f"Already visited {record_name}, skipping recursion")
+            return {"data": {"result": []}}
+
+        if record_name not in self.rules_map:
+            logger.warning(f"No expression found for recording rule: {record_name}")
+            return {"data": {"result": []}}
+
+        visited.add(record_name)
+        expr = self.rules_map[record_name]
+
+        # Detect other recording rules used in this expr
+        tokens = re.findall(r"[a-zA-Z0-9_:]+", expr)
+        dependency_rules = [tok for tok in tokens if tok in self.rules_map and tok != record_name]
+
+        # Recursively backfill dependencies first
+        for dep in dependency_rules:
+            logger.info(f"Backfilling dependency {dep} for {record_name}")
+            self.backfill_rule_recursive(dep, start, end, step, visited=visited)
+
+        # Now backfill this rule itself
+        logger.info(f"Backfilling rule: {record_name}")
+        results = self.backfill_rule(record_name=record_name, start=start, end=end, step=step)
+        return results
