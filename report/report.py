@@ -66,28 +66,26 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 # --- Backfill if Prometheus returned empty ---
                 if not results_list:
-                    logger.warning(f"No results for {expr_resolved}, attempting backfill...")
-                    try:
-                        # Recompute the missing recording rule(s) for the timeframe
-                        df_backfill = backfiller.recompute_rule_for_timeframe(
-                            rule_name=extract_metric(expr_resolved),  # or pass the top-level recording rule
+                    # Extract all token-like names from the PromQL
+                    promql_tokens = re.findall(r"[a-zA-Z0-9_:]+", expr_resolved)
+                    # Only keep those that exist as recording rules
+                    found_rules = [tok for tok in promql_tokens if tok in backfiller.rules_map]
+
+                    if found_rules:
+                        # Use the first matching recording rule
+                        found_rule = found_rules[0]
+                        logger.info(f"Detected recording rule in PromQL: {found_rule}, attempting backfill")
+
+                        results = backfiller.backfill_rule(
+                            record_name=found_rule,
                             start=start_dt,
                             end=end_dt,
                             step=range_seconds
                         )
-                        if not df_backfill.empty:
-                            # Convert backfill DataFrame to Prometheus-like JSON for merging
-                            results_list = []
-                            for _, row in df_backfill.iterrows():
-                                results_list.append({
-                                    "metric": {"project": row["project"], "department": row["department"]},
-                                    "values": [[0, row[df_backfill.columns[2]]]]  # use last value only
-                                })
-                            logger.info(f"Backfill succeeded for {expr_resolved}")
-                        else:
-                            logger.warning(f"Backfill returned no data for {expr_resolved}")
-                    except Exception as e:
-                        logger.error(f"Backfill failed for {expr_resolved}: {e}")
+                        results_list = results.get("data", {}).get("result", [])
+
+                    if not results_list:
+                        logger.warning(f"Backfill returned no data for {expr_resolved}")
 
 
                 # --- Convert results to rows ---
