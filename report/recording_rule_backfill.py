@@ -96,9 +96,14 @@ class RecordingRuleBackfill:
             })
         return {"data": {"result": result}}
 
-    def backfill_rule_recursive(self, record_name, start, end, step, visited=None):
+    def backfill_rule_recursive(self, record_name, start, end, step, visited=None, cache=None):
         if visited is None:
             visited = set()
+        if cache is None:
+            cache = {}
+
+        if record_name in cache:
+            return cache[record_name]
 
         if record_name in visited:
             logger.warning(f"Already visited {record_name}, skipping recursion")
@@ -111,16 +116,68 @@ class RecordingRuleBackfill:
         visited.add(record_name)
         expr = self.rules_map[record_name]
 
-        # Detect other recording rules used in this expr
         tokens = re.findall(r"[a-zA-Z0-9_:]+", expr)
         dependency_rules = [tok for tok in tokens if tok in self.rules_map and tok != record_name]
 
         # Recursively backfill dependencies first
         for dep in dependency_rules:
             logger.info(f"Backfilling dependency {dep} for {record_name}")
-            self.backfill_rule_recursive(dep, start, end, step, visited=visited)
+            self.backfill_rule_recursive(dep, start, end, step, visited=visited, cache=cache)
 
-        # Now backfill this rule itself
         logger.info(f"Backfilling rule: {record_name}")
         results = self.backfill_rule(record_name=record_name, start=start, end=end, step=step)
+        cache[record_name] = results
         return results
+
+    def _build_dependency_graph(self):
+        """
+        Build a graph {rule_name: [dependencies]}.
+        """
+        graph = defaultdict(list)
+        for rule, expr in self.rules_map.items():
+            deps = self._find_dependencies(expr)
+            graph[rule] = deps
+        return graph
+
+    def _topological_sort(self, graph):
+        """
+        Return a list of rules in topological order.
+        """
+        in_degree = {node: 0 for node in graph}
+        for deps in graph.values():
+            for dep in deps:
+                in_degree[dep] += 1
+
+        # Start with nodes that have no incoming edges
+        queue = deque([node for node, deg in in_degree.items() if deg == 0])
+        sorted_rules = []
+
+        while queue:
+            node = queue.popleft()
+            sorted_rules.append(node)
+            for dep in graph[node]:
+                in_degree[dep] -= 1
+                if in_degree[dep] == 0:
+                    queue.append(dep)
+
+        if len(sorted_rules) != len(graph):
+            logger.warning("Detected cycle in recording rules dependencies!")
+        return sorted_rules
+
+    def backfill_all_flattened(self, start, end, step=3600):
+        """
+        Backfill all recording rules in flattened order.
+        Returns a dict {rule_name: DataFrame}.
+        """
+        graph = self._build_dependency_graph()
+        sorted_rules = self._topological_sort(graph)
+        results_cache = {}
+
+        for rule in sorted_rules:
+            logger.info(f"Backfilling rule {rule} (flattened order)")
+            deps = graph[rule]
+            # Replace dependencies with cached DataFrames if needed (currently just computes rule)
+            df = self.recompute_rule_for_timeframe(rule, start, end, step)
+            results_cache[rule] = df
+
+        return results_cache
