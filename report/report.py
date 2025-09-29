@@ -27,7 +27,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
     temp_uid, csv_files, pdf_path, dashboard_tz = None, [], None, None
 
     # Initialize recording rule backfiller
-    backfiller = RecordingRuleBackfill("/path/to/recording_rules.yaml")
+    backfiller = RecordingRuleBackfill("runai.yaml")
 
     try:
         # --- Clone dashboard and extract timezone ---
