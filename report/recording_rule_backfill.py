@@ -12,22 +12,27 @@ logger = logging.getLogger(__name__)
 
 class RecordingRuleBackfill:
     def __init__(self, yaml_path=None):
+        # Default YAML in same folder
         if yaml_path is None:
             yaml_path = os.path.join(os.path.dirname(__file__), "runai.yaml")
+
         if not os.path.exists(yaml_path):
             raise FileNotFoundError(f"Recording rules YAML not found: {yaml_path}")
 
         with open(yaml_path, "r") as f:
             data = yaml.safe_load(f)
 
-        # Flatten all groups into {rule_name: expr}
+        # Handle full PrometheusRule manifest: data['items'][*]['spec']['groups'][*]['rules']
         self.rules_map = {}
-        for group in data.get("groups", []):
-            for rule in group.get("rules", []):
-                if "record" in rule and "expr" in rule:
-                    self.rules_map[rule["record"]] = rule["expr"]
+        items = data.get("items", [])
+        for item in items:
+            spec = item.get("spec", {})
+            for group in spec.get("groups", []):
+                for rule in group.get("rules", []):
+                    if "record" in rule and "expr" in rule:
+                        self.rules_map[rule["record"]] = rule["expr"]
 
-        logger.info(f"Loaded {len(self.rules_map)} recording rules")
+        logger.info(f"Loaded {len(self.rules_map)} recording rules from {yaml_path}")
 
     def _find_dependencies(self, expr: str):
         """
