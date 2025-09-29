@@ -26,6 +26,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
     temp_uid, csv_files, pdf_path, dashboard_tz = None, [], None, None
 
     backfiller = RecordingRuleBackfill(os.path.join(os.path.dirname(__file__), "runai.yaml"))
+    backfill_cache = {}  # (rule_name, start, end) -> DataFrame
 
     try:
         # --- Clone dashboard and extract timezone ---
@@ -33,10 +34,10 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         temp_uid, table_panels, GRAFANA_VARS, dash_json = clone_dashboard_without_panels(
             dashboard_uid, excluded_titles, return_json=True
         )
-
         dashboard_tz = dash_json.get("timezone", "UTC")
         logger.info(f"Dashboard timezone = {dashboard_tz}")
 
+        # --- Compute date range ---
         start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
         logger.info(f"Querying Prometheus from {start_dt} to {end_dt} in chunks of {chunk_hours}h")
 
@@ -47,9 +48,9 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             for expr in panel["queries"]:
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
                 metric_name = extract_metric(expr_resolved)
-                range_seconds = int((end_dt - start_dt).total_seconds())
+                total_seconds = int((end_dt - start_dt).total_seconds())
 
-                # --- Chunk the time range ---
+                # --- Split time into chunks ---
                 chunk_delta = timedelta(hours=chunk_hours)
                 chunk_ranges = []
                 chunk_start = start_dt
@@ -58,17 +59,16 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     chunk_ranges.append((chunk_start, chunk_end))
                     chunk_start = chunk_end
 
-                # Function to query/backfill a single chunk
+                # --- Function to query/backfill a single chunk ---
                 def query_chunk(chunk_range):
                     cs, ce = chunk_range
                     logger.info(f"[Chunk {cs} -> {ce}] Querying {metric_name}")
-
                     try:
-                        results = query_prometheus_range(expr_resolved, start=cs, end=ce, step=range_seconds)
+                        results = query_prometheus_range(expr_resolved, start=cs, end=ce, step=total_seconds)
                         results_list = results.get("data", {}).get("result", [])
 
                         if not results_list:
-                            # --- Use old workaround: match metric_name to recording rule ---
+                            # Attempt to match metric_name to a recording rule
                             matching_rule = None
                             for rule_name in backfiller.rules_map:
                                 if metric_name.lower().replace(" ", "_") in rule_name.lower():
@@ -76,11 +76,17 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                                     break
 
                             if matching_rule:
-                                logger.info(f"[Chunk {cs} -> {ce}] Backfilling {matching_rule} for {metric_name}")
-                                df = backfiller.backfill_rule_recursive(matching_rule, cs, ce, step=range_seconds)
+                                cache_key = (matching_rule, cs, ce)
+                                if cache_key in backfill_cache:
+                                    logger.info(f"[Chunk {cs} -> {ce}] Using cached backfill for {matching_rule}")
+                                    return backfill_cache[cache_key]
+
+                                logger.info(f"[Chunk {cs} -> {ce}] Backfilling {matching_rule}")
+                                df = backfiller.backfill_rule_recursive(matching_rule, cs, ce, step=total_seconds)
+                                backfill_cache[cache_key] = df
                                 return df
                             else:
-                                logger.warning(f"[Chunk {cs} -> {ce}] No backfilled data found for {metric_name}")
+                                logger.warning(f"[Chunk {cs} -> {ce}] No backfilled data found for metric: {metric_name}")
                                 return pd.DataFrame(columns=["project", "department", metric_name])
                         else:
                             return backfiller._prometheus_result_to_df(results, metric_name)
@@ -89,17 +95,17 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                         logger.error(f"[Chunk {cs} -> {ce}] Query failed for {metric_name}: {e}")
                         return pd.DataFrame(columns=["project", "department", metric_name])
 
-                # --- Run chunks in parallel ---
+                # --- Parallel chunk execution ---
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     chunk_dfs = list(executor.map(query_chunk, chunk_ranges))
 
-                # --- Merge chunk results ---
+                # --- Merge all chunks ---
                 if chunk_dfs:
                     df = pd.concat(chunk_dfs, ignore_index=True)
                 else:
                     df = pd.DataFrame(columns=["project", "department", metric_name])
 
-                # --- Merge with previous panel_df ---
+                # --- Merge with panel_df ---
                 panel_df = df if panel_df is None else pd.merge(
                     panel_df, df, on=["project", "department"], how="outer"
                 )
@@ -107,6 +113,12 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             # --- Save CSV ---
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
+                panel_df.rename(columns={
+                    "Runai Allocated Gpu Count": "GPU allocation hours.",
+                    "Runai Allocated Millicpus": "Allocated mCPUs",
+                    "Runai Used Cpu Cores": "CPU Usage (cores)",
+                    "Runai Used Memory Bytes": "Memory Usage (bytes)",
+                }, inplace=True)
                 safe_title = re.sub(r'[^A-Za-z0-9_\-]', '_', panel['title'])
                 csv_path = os.path.join("/tmp", f"{safe_title}.csv")
                 os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -120,7 +132,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         render_url = (
             f"{os.getenv('GRAFANA_URL')}/render/d/{temp_uid}"
             f"?kiosk&width=2480&height=10000&theme=light"
-            f"&tz={dashboard_tz}&from={TIME_FROM}&to={TIME_TO}"
+            f"&tz=Europe/Amsterdam&from={TIME_FROM}&to={TIME_TO}"
         )
         logger.info(f"Rendering dashboard at {render_url}")
 
