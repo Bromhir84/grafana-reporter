@@ -1,70 +1,82 @@
-import yaml
 import logging
-from .prometheus_utils import query_prometheus_range
+import yaml
+import re
+import os
 from datetime import datetime
+import pandas as pd
+from .prometheus_utils import query_prometheus_range
 
 logger = logging.getLogger(__name__)
 
+
 class RecordingRuleBackfill:
-    def __init__(self, yaml_path):
-        self.yaml_path = yaml_path
-        self.rules_map = {}  # record_name -> expr
-        self._load_yaml()
+    def __init__(self, yaml_path="runai_rules.yaml"):
+        if not os.path.exists(yaml_path):
+            raise FileNotFoundError(f"Recording rules YAML not found: {yaml_path}")
+        with open(yaml_path, "r") as f:
+            data = yaml.safe_load(f)
 
-    def _load_yaml(self):
-        """Load recording rules YAML and build a mapping."""
-        with open(self.yaml_path) as f:
-            rules_yaml = yaml.safe_load(f)
-
-        for group in rules_yaml.get("groups", []):
+        # Flatten all groups into {rule_name: expr}
+        self.rules = {}
+        for group in data.get("groups", []):
             for rule in group.get("rules", []):
-                record_name = rule.get("record")
-                expr = rule.get("expr")
-                if record_name and expr:
-                    self.rules_map[record_name] = expr
+                if "record" in rule and "expr" in rule:
+                    self.rules[rule["record"]] = rule["expr"]
 
-        logger.info(f"Loaded {len(self.rules_map)} recording rules from YAML")
+        logger.info(f"Loaded {len(self.rules)} recording rules")
 
-    def backfill_rule(self, record_name, start: datetime, end: datetime, step: int = 3600, seen=None):
+    def _find_dependencies(self, expr: str):
         """
-        Recursively backfill a recording rule by querying Prometheus.
-        Returns results in Prometheus API format (dict).
+        Return list of recording rules used inside this expression.
         """
-        if seen is None:
-            seen = set()
+        deps = []
+        for rule in self.rules.keys():
+            if re.search(rf"\b{re.escape(rule)}\b", expr):
+                deps.append(rule)
+        return deps
 
-        if record_name in seen:
-            logger.warning(f"Detected circular dependency on rule: {record_name}")
-            return {"data": {"result": []}}  # prevent infinite recursion
+    def resolve_rule(self, rule_name: str, start: datetime, end: datetime, step: int = 3600):
+        """
+        Resolve a recording rule recursively. If dependencies are other recording rules,
+        resolve them first. At each level, query Prometheus.
+        """
+        if rule_name not in self.rules:
+            logger.warning(f"No recording rule found for {rule_name}")
+            return None
 
-        seen.add(record_name)
+        expr = self.rules[rule_name]
+        deps = self._find_dependencies(expr)
 
-        expr = self.rules_map.get(record_name)
-        if not expr:
-            logger.warning(f"No expression found for recording rule: {record_name}")
-            return {"data": {"result": []}}
+        if not deps:
+            # Raw-level expression -> query directly
+            logger.debug(f"Querying raw expression for {rule_name}: {expr}")
+            return query_prometheus_range(expr, start, end, step)
 
-        # Check if expr references another recording rule
-        # e.g., look for any word in rules_map keys in expr
-        for dep_name in self.rules_map:
-            if dep_name in expr:
-                logger.info(f"Rule {record_name} depends on {dep_name}, resolving recursively")
-                # Backfill the dependency
-                dep_result = self.backfill_rule(dep_name, start, end, step, seen)
-                # You can implement logic here to merge dep_result into expr evaluation if needed
-                # For now, we just ensure dep_rule is resolved before querying
+        # Resolve dependencies first
+        for dep in deps:
+            logger.debug(f"{rule_name} depends on {dep}, resolving...")
+            self.resolve_rule(dep, start, end, step)
 
-        logger.info(f"Querying Prometheus for recording rule: {record_name} -> {expr}")
-        try:
-            results = query_prometheus_range(expr, start=start, end=end, step=step)
-        except Exception as e:
-            logger.error(f"Failed to query Prometheus for {record_name}: {e}")
-            results = {"data": {"result": []}}
+        # Now query this rule’s expression (with deps intact)
+        logger.debug(f"Querying resolved expression for {rule_name}: {expr}")
+        return query_prometheus_range(expr, start, end, step)
 
-        # If results are empty, you can optionally fill zeros
-        if not results.get("data", {}).get("result"):
-            logger.warning(f"No data returned for {record_name}")
-            # Could return zeros here if you want to auto-fill downstream
-            # results = self._fill_zeros()  # implement if needed
+    def resolve_expression(self, expr: str, start: datetime, end: datetime, step: int = 3600):
+        """
+        Resolve an arbitrary Grafana/PromQL expression:
+        - If it uses recording rules, resolve them recursively.
+        - Always end by querying Prometheus for the final expression.
+        """
+        deps = self._find_dependencies(expr)
+        if not deps:
+            logger.debug(f"Querying raw Grafana expression: {expr}")
+            return query_prometheus_range(expr, start, end, step)
 
-        return results
+        # Resolve dependencies first
+        for dep in deps:
+            logger.debug(f"Grafana expression depends on {dep}, resolving...")
+            self.resolve_rule(dep, start, end, step)
+
+        # Finally, query the top-level expression
+        logger.debug(f"Querying Grafana expression after resolving deps: {expr}")
+        return query_prometheus_range(expr, start, end, step)

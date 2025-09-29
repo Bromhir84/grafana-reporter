@@ -66,20 +66,17 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 # --- Backfill if Prometheus returned empty ---
                 if not results_list:
-                    recording_rule_names = set(backfiller.rules_map.keys())
-                    matches = re.findall(r"[a-zA-Z0-9_:]+", expr_resolved)
-                    found_rules = [m for m in matches if m in recording_rule_names]
-
-                    if found_rules:
-                        found_rule = found_rules[0]
-                        logger.info(f"Detected recording rule in PromQL: {found_rule}")
-                        results = backfiller.backfill_rule(
-                            record_name=found_rule,
-                            start=start_dt,
-                            end=end_dt,
-                            step=range_seconds
-                        )
+                    logger.warning(f"No results for {expr_resolved}, attempting backfill...")
+                    try:
+                        results = backfiller.resolve_expression(expr_resolved, start=start_dt, end=end_dt, step=range_seconds)
                         results_list = results.get("data", {}).get("result", [])
+                        if results_list:
+                            logger.info(f"Backfill succeeded for {expr_resolved}")
+                        else:
+                            logger.warning(f"Backfill returned no data for {expr_resolved}")
+                    except Exception as e:
+                        logger.error(f"Backfill failed for {expr_resolved}: {e}")
+
 
                 # --- Convert results to rows ---
                 for r in results_list:
