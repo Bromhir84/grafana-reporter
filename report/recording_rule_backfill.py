@@ -83,6 +83,20 @@ class RecordingRuleBackfill:
         # Note: Only sum by (project, department) is currently supported
         return df
 
+    def backfill_rule(self, record_name, start, end, step=3600):
+        """
+        Wrapper for recursive backfill that returns Prometheus-style dict.
+        """
+        df = self.recompute_rule_for_timeframe(record_name, start, end, step)
+        # Convert df to Prometheus JSON format
+        result = []
+        for _, row in df.iterrows():
+            result.append({
+                "metric": {"project": row["project"], "department": row["department"]},
+                "values": [[start.timestamp(), row[record_name]]]
+            })
+        return {"data": {"result": result}}
+
     def _prometheus_result_to_df(self, results, column_name):
         """
         Convert Prometheus query result JSON to DataFrame
