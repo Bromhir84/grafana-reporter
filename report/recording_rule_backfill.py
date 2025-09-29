@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class RecordingRuleBackfill:
-    def __init__(self, yaml_path="runai_rules.yaml"):
+    def __init__(self, yaml_path="runai.yaml"):
         if not os.path.exists(yaml_path):
             raise FileNotFoundError(f"Recording rules YAML not found: {yaml_path}")
 
