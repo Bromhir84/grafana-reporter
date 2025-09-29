@@ -79,17 +79,23 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                                 cache_key = (matching_rule, cs, ce)
                                 if cache_key in backfill_cache:
                                     logger.info(f"[Chunk {cs} -> {ce}] Using cached backfill for {matching_rule}")
-                                    return backfill_cache[cache_key]
+                                    df = backfill_cache[cache_key]
+                                else:
+                                    logger.info(f"[Chunk {cs} -> {ce}] Backfilling {matching_rule}")
+                                    df = backfiller.backfill_rule_recursive(matching_rule, cs, ce, step=total_seconds)
 
-                                logger.info(f"[Chunk {cs} -> {ce}] Backfilling {matching_rule}")
-                                df = backfiller.backfill_rule_recursive(matching_rule, cs, ce, step=total_seconds)
-                                backfill_cache[cache_key] = df
+                                    # Ensure df is a DataFrame
+                                    if isinstance(df, dict):
+                                        df = backfiller._prometheus_result_to_df(df, metric_name)
+
+                                    backfill_cache[cache_key] = df
                                 return df
                             else:
                                 logger.warning(f"[Chunk {cs} -> {ce}] No backfilled data found for metric: {metric_name}")
                                 return pd.DataFrame(columns=["project", "department", metric_name])
                         else:
-                            return backfiller._prometheus_result_to_df(results, metric_name)
+                            df = backfiller._prometheus_result_to_df(results, metric_name)
+                            return df
 
                     except Exception as e:
                         logger.error(f"[Chunk {cs} -> {ce}] Query failed for {metric_name}: {e}")
