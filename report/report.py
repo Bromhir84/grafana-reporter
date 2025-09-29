@@ -53,21 +53,37 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 range_seconds = int((end_dt - start_dt).total_seconds())
                 logger.info(f"Querying Prometheus: {expr_resolved}")
 
+                # Query Prometheus
                 try:
                     results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt, step=range_seconds)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
 
-                rows = []
                 results_list = results.get("data", {}).get("result", [])
+                rows = []
 
-                # Collect rows from results
+                # --- Detect recording rule reference dynamically ---
+                if not results_list:
+                    # Extract possible recording rule names from PromQL
+                    # Matches words with letters/numbers/underscore/colon (Prometheus record name pattern)
+                    matches = re.findall(r"\b[a-zA-Z0-9_:]+\b", expr_resolved)
+                    found_rule = None
+                    for m in matches:
+                        if m in backfiller.rules_map:
+                            found_rule = m
+                            break
+
+                    if found_rule:
+                        logger.info(f"Backfilling missing metric from recording rule: {found_rule}")
+                        results = backfiller.backfill_rule(found_rule, start=start_dt, end=end_dt, step=range_seconds)
+                        results_list = results.get("data", {}).get("result", [])
+
+                # --- Process results into rows ---
                 for r in results_list:
                     metric_labels = r.get("metric", {})
                     project = metric_labels.get("project", "unknown")
                     department = metric_labels.get("department", "unknown")
-
                     if r.get("values"):
                         _, value = r["values"][-1]
                         rows.append({
@@ -76,43 +92,18 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                             metric_name: float(value)
                         })
 
-                # If the query returned no results, create zeros for all known projects/departments
+                # --- Fallback to zeros if still empty ---
                 if not rows:
-                    # Attempt to backfill from recording rule YAML
-                    backfill_results = backfiller.backfill_rule(
-                        record_name=expr_resolved,
-                        start=start_dt,
-                        end=end_dt,
-                        step=range_seconds
+                    known_keys = (
+                        panel_df[["project", "department"]].drop_duplicates().to_dict("records")
+                        if panel_df is not None else [{"project": "unknown", "department": "unknown"}]
                     )
-
-                    results_list = backfill_results.get("data", {}).get("result", [])
-
-                    if results_list:
-                        for r in results_list:
-                            metric_labels = r.get("metric", {})
-                            project = metric_labels.get("project", "unknown")
-                            department = metric_labels.get("department", "unknown")
-
-                            if r.get("values"):
-                                _, value = r["values"][-1]
-                                rows.append({
-                                    "project": project,
-                                    "department": department,
-                                    metric_name: float(value)
-                                })
-                    else:
-                        # Fallback to zeros if even backfill returns nothing
-                        known_keys = (
-                            panel_df[["project", "department"]].drop_duplicates().to_dict("records")
-                            if panel_df is not None else [{"project": "unknown", "department": "unknown"}]
-                        )
-                        for k in known_keys:
-                            rows.append({
-                                "project": k["project"],
-                                "department": k["department"],
-                                metric_name: 0.0
-                            })
+                    for k in known_keys:
+                        rows.append({
+                            "project": k["project"],
+                            "department": k["department"],
+                            metric_name: 0.0
+                        })
 
                 # Convert rows to DataFrame
                 df = pd.DataFrame(rows)
