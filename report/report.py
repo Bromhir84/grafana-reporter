@@ -22,7 +22,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Initialize recording rule backfiller
-backfiller = RecordingRuleBackfill("runai.yaml")
+backfiller = RecordingRuleBackfill(os.path.join(os.path.dirname(__file__), "runai.yaml"))
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
