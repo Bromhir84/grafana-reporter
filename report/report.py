@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import pytz
 from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV
@@ -21,13 +21,59 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-
-def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
+def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None, chunk_days=7):
     excluded_titles = excluded_titles or []
     temp_uid, csv_files, pdf_path, dashboard_tz = None, [], None, None
 
     # Initialize recording rule backfiller
     backfiller = RecordingRuleBackfill(os.path.join(os.path.dirname(__file__), "runai.yaml"))
+
+    def query_with_chunks(expr_resolved, start, end, step):
+        dfs = []
+        chunk_start = start
+
+        while chunk_start < end:
+            chunk_end = min(chunk_start + timedelta(days=chunk_days), end)
+            logger.info(f"Querying chunk: {chunk_start} -> {chunk_end} for {expr_resolved}")
+
+            try:
+                results = query_prometheus_range(expr_resolved, start=chunk_start, end=chunk_end, step=step)
+                results_list = results.get("data", {}).get("result", [])
+            except Exception as e:
+                logger.error(f"Prometheus query failed for chunk {chunk_start} -> {chunk_end}: {e}")
+                results_list = []
+
+            # Backfill if empty
+            if not results_list:
+                recording_rule_names = set(backfiller.rules_map.keys())
+                matches = re.findall(r"[a-zA-Z0-9_:]+", expr_resolved)
+                found_rules = [m for m in matches if m in recording_rule_names]
+
+                if found_rules:
+                    found_rule = found_rules[0]
+                    logger.info(f"No data in chunk, backfilling rule: {found_rule}")
+                    backfill_results = backfiller.backfill_rule_recursive(found_rule, chunk_start, chunk_end, step)
+                    results_list = backfill_results.get("data", {}).get("result", [])
+
+            # Convert Prometheus results to DataFrame
+            rows = []
+            for r in results_list:
+                metric_labels = r.get("metric", {})
+                project = metric_labels.get("project", "unknown")
+                department = metric_labels.get("department", "unknown")
+                if r.get("values"):
+                    _, value = r["values"][-1]
+                    rows.append({"project": project, "department": department, expr_resolved: float(value)})
+            if not rows:
+                rows.append({"project": "unknown", "department": "unknown", expr_resolved: 0.0})
+
+            dfs.append(pd.DataFrame(rows))
+            chunk_start = chunk_end
+
+        # Combine all chunks and sum duplicates
+        combined_df = pd.concat(dfs)
+        combined_df = combined_df.groupby(["project", "department"], as_index=False).sum()
+        return combined_df
 
     try:
         # --- Clone dashboard and extract timezone ---
@@ -52,68 +98,9 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
                 metric_name = extract_metric(expr_resolved)
                 range_seconds = int((end_dt - start_dt).total_seconds())
-                logger.info(f"Querying Prometheus: {expr_resolved}")
+                logger.info(f"Processing metric: {expr_resolved}")
 
-                try:
-                    results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt, step=range_seconds)
-                except Exception as e:
-                    logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
-                    continue
-
-                results_list = results.get("data", {}).get("result", [])
-                rows = []
-
-                # --- Backfill if Prometheus returned empty ---
-                if not results_list:
-                    logger.warning(f"No results for {expr_resolved}, attempting backfill...")
-
-                    # Flatten all rules and get cached DataFrames
-                    backfilled_dfs = backfiller.backfill_all_flattened(start_dt, end_dt, range_seconds)
-
-                    # Try to match metric_name to a recording rule
-                    matching_rule = None
-                    for rule_name in backfilled_dfs:
-                        if metric_name in rule_name:
-                            matching_rule = rule_name
-                            break
-
-                    if matching_rule:
-                        logger.info(f"Using backfilled data for {matching_rule}")
-                        df = backfilled_dfs[matching_rule]
-                        results_list = df.to_dict("records")
-                    else:
-                        logger.warning(f"No backfilled data found for metric: {metric_name}")
-
-                # --- Convert Prometheus results to rows ---
-                if results_list and isinstance(results_list, list):
-                    for r in results_list:
-                        if isinstance(r, dict):
-                            # Already a dict from backfilled DataFrame
-                            rows.append(r)
-                        else:
-                            metric_labels = r.get("metric", {})
-                            project = metric_labels.get("project", "unknown")
-                            department = metric_labels.get("department", "unknown")
-                            if r.get("values"):
-                                _, value = r["values"][-1]
-                                rows.append({
-                                    "project": project,
-                                    "department": department,
-                                    metric_name: float(value)
-                                })
-
-                # --- If still no rows, create zeros ---
-                if not rows:
-                    known_keys = (
-                        panel_df[["project", "department"]].drop_duplicates().to_dict("records")
-                        if panel_df is not None else [{"project": "unknown", "department": "unknown"}]
-                    )
-                    for k in known_keys:
-                        rows.append({"project": k["project"], "department": k["department"], metric_name: 0.0})
-
-                df = pd.DataFrame(rows)
-
-                # Merge with previous panel_df
+                df = query_with_chunks(expr_resolved, start_dt, end_dt, range_seconds)
                 panel_df = df if panel_df is None else pd.merge(
                     panel_df, df,
                     on=["project", "department"],
