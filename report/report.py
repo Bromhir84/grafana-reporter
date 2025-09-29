@@ -68,9 +68,21 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 if not results_list:
                     logger.warning(f"No results for {expr_resolved}, attempting backfill...")
                     try:
-                        results = backfiller.resolve_expression(expr_resolved, start=start_dt, end=end_dt, step=range_seconds)
-                        results_list = results.get("data", {}).get("result", [])
-                        if results_list:
+                        # Recompute the missing recording rule(s) for the timeframe
+                        df_backfill = backfiller.recompute_rule_for_timeframe(
+                            rule_name=extract_metric(expr_resolved),  # or pass the top-level recording rule
+                            start=start_dt,
+                            end=end_dt,
+                            step=range_seconds
+                        )
+                        if not df_backfill.empty:
+                            # Convert backfill DataFrame to Prometheus-like JSON for merging
+                            results_list = []
+                            for _, row in df_backfill.iterrows():
+                                results_list.append({
+                                    "metric": {"project": row["project"], "department": row["department"]},
+                                    "values": [[0, row[df_backfill.columns[2]]]]  # use last value only
+                                })
                             logger.info(f"Backfill succeeded for {expr_resolved}")
                         else:
                             logger.warning(f"Backfill returned no data for {expr_resolved}")
