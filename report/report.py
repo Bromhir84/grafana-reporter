@@ -1,7 +1,12 @@
 import logging
 from datetime import datetime, timedelta
 import os
-import pytz
+import re
+from PIL import Image
+import io
+import pandas as pd
+import concurrent.futures
+
 from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV
 from .grafana_utils import clone_dashboard_without_panels, delete_dashboard, paginate_to_a4, generate_pdf_from_pages
 from .prometheus_utils import (
@@ -13,12 +18,6 @@ from .prometheus_utils import (
 )
 from .email_utils import send_email
 from .recording_rule_backfill import RecordingRuleBackfill
-
-import re
-from PIL import Image
-import io
-import pandas as pd
-import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 metric_name = extract_metric(expr_resolved)
                 range_seconds = int((end_dt - start_dt).total_seconds())
 
-                # Split time into chunks
+                # --- Chunk the time range ---
                 chunk_delta = timedelta(hours=chunk_hours)
                 chunk_ranges = []
                 chunk_start = start_dt
@@ -63,29 +62,44 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 def query_chunk(chunk_range):
                     cs, ce = chunk_range
                     logger.info(f"[Chunk {cs} -> {ce}] Querying {metric_name}")
+
                     try:
                         results = query_prometheus_range(expr_resolved, start=cs, end=ce, step=range_seconds)
                         results_list = results.get("data", {}).get("result", [])
+
                         if not results_list:
-                            # Backfill if empty
-                            return backfiller.backfill_rule_recursive(metric_name, cs, ce, step=range_seconds)
+                            # --- Use old workaround: match metric_name to recording rule ---
+                            matching_rule = None
+                            for rule_name in backfiller.rules_map:
+                                if metric_name.lower().replace(" ", "_") in rule_name.lower():
+                                    matching_rule = rule_name
+                                    break
+
+                            if matching_rule:
+                                logger.info(f"[Chunk {cs} -> {ce}] Backfilling {matching_rule} for {metric_name}")
+                                df = backfiller.backfill_rule_recursive(matching_rule, cs, ce, step=range_seconds)
+                                return df
+                            else:
+                                logger.warning(f"[Chunk {cs} -> {ce}] No backfilled data found for {metric_name}")
+                                return pd.DataFrame(columns=["project", "department", metric_name])
                         else:
                             return backfiller._prometheus_result_to_df(results, metric_name)
+
                     except Exception as e:
-                        logger.error(f"Chunk query failed for {metric_name} ({cs} -> {ce}): {e}")
+                        logger.error(f"[Chunk {cs} -> {ce}] Query failed for {metric_name}: {e}")
                         return pd.DataFrame(columns=["project", "department", metric_name])
 
-                # --- Parallel execution ---
+                # --- Run chunks in parallel ---
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     chunk_dfs = list(executor.map(query_chunk, chunk_ranges))
 
-                # Merge all chunks
+                # --- Merge chunk results ---
                 if chunk_dfs:
                     df = pd.concat(chunk_dfs, ignore_index=True)
                 else:
                     df = pd.DataFrame(columns=["project", "department", metric_name])
 
-                # Merge with previous panel_df
+                # --- Merge with previous panel_df ---
                 panel_df = df if panel_df is None else pd.merge(
                     panel_df, df, on=["project", "department"], how="outer"
                 )
@@ -93,12 +107,6 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             # --- Save CSV ---
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
-                panel_df.rename(columns={
-                    "Runai Allocated Gpu Count": "GPU allocation hours.",
-                    "Runai Allocated Millicpus": "Allocated mCPUs",
-                    "Runai Used Cpu Cores": "CPU Usage (cores)",
-                    "Runai Used Memory Bytes": "Memory Usage (bytes)",
-                }, inplace=True)
                 safe_title = re.sub(r'[^A-Za-z0-9_\-]', '_', panel['title'])
                 csv_path = os.path.join("/tmp", f"{safe_title}.csv")
                 os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -112,7 +120,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         render_url = (
             f"{os.getenv('GRAFANA_URL')}/render/d/{temp_uid}"
             f"?kiosk&width=2480&height=10000&theme=light"
-            f"&tz=Europe/Amsterdam&from={TIME_FROM}&to={TIME_TO}"
+            f"&tz={dashboard_tz}&from={TIME_FROM}&to={TIME_TO}"
         )
         logger.info(f"Rendering dashboard at {render_url}")
 
