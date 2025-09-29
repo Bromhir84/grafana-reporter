@@ -21,18 +21,19 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Initialize recording rule backfiller
-backfiller = RecordingRuleBackfill(os.path.join(os.path.dirname(__file__), "runai.yaml"))
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
     temp_uid, csv_files, pdf_path, dashboard_tz = None, [], None, None
 
+    # Initialize recording rule backfiller
+    backfiller = RecordingRuleBackfill("/path/to/recording_rules.yaml")
+
     try:
         # --- Clone dashboard and extract timezone ---
         dashboard_uid = extract_uid_from_url(dashboard_url)
         temp_uid, table_panels, GRAFANA_VARS, dash_json = clone_dashboard_without_panels(
-            dashboard_uid, excluded_titles, return_json=True  # update utils for this
+            dashboard_uid, excluded_titles, return_json=True
         )
 
         dashboard_tz = dash_json.get("timezone", "UTC")
@@ -63,23 +64,24 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 results_list = results.get("data", {}).get("result", [])
                 rows = []
 
-                # --- Detect recording rule reference dynamically ---
+                # --- Backfill if Prometheus returned empty ---
                 if not results_list:
-                    # Extract possible recording rule names from PromQL
-                    # Matches words with letters/numbers/underscore/colon (Prometheus record name pattern)
-                    matches = re.findall(r"\b[a-zA-Z0-9_:]+\b", expr_resolved)
-                    found_rule = None
-                    for m in matches:
-                        if m in backfiller.rules_map:
-                            found_rule = m
-                            break
+                    recording_rule_names = set(backfiller.rules_map.keys())
+                    matches = re.findall(r"[a-zA-Z0-9_:]+", expr_resolved)
+                    found_rules = [m for m in matches if m in recording_rule_names]
 
-                    if found_rule:
-                        logger.info(f"Backfilling missing metric from recording rule: {found_rule}")
-                        results = backfiller.backfill_rule(found_rule, start=start_dt, end=end_dt, step=range_seconds)
+                    if found_rules:
+                        found_rule = found_rules[0]
+                        logger.info(f"Detected recording rule in PromQL: {found_rule}")
+                        results = backfiller.backfill_rule(
+                            record_name=found_rule,
+                            start=start_dt,
+                            end=end_dt,
+                            step=range_seconds
+                        )
                         results_list = results.get("data", {}).get("result", [])
 
-                # --- Process results into rows ---
+                # --- Convert results to rows ---
                 for r in results_list:
                     metric_labels = r.get("metric", {})
                     project = metric_labels.get("project", "unknown")
@@ -105,17 +107,13 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                             metric_name: 0.0
                         })
 
-                # Convert rows to DataFrame
+                # --- Merge with previous panel_df ---
                 df = pd.DataFrame(rows)
-
-                # Merge with previous panel_df
                 panel_df = df if panel_df is None else pd.merge(
-                    panel_df, df,
-                    on=["project", "department"],
-                    how="outer"
+                    panel_df, df, on=["project", "department"], how="outer"
                 )
 
-            # Save CSV if panel_df has data
+            # --- Save CSV if panel_df has data ---
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
                 panel_df.rename(columns={
