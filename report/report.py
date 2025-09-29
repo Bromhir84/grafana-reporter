@@ -18,62 +18,15 @@ import re
 from PIL import Image
 import io
 import pandas as pd
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
-def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None, chunk_days=7):
+def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None, chunk_hours: int = 24, max_workers: int = 4):
     excluded_titles = excluded_titles or []
     temp_uid, csv_files, pdf_path, dashboard_tz = None, [], None, None
 
-    # Initialize recording rule backfiller
     backfiller = RecordingRuleBackfill(os.path.join(os.path.dirname(__file__), "runai.yaml"))
-
-    def query_with_chunks(expr_resolved, start, end, step):
-        dfs = []
-        chunk_start = start
-
-        while chunk_start < end:
-            chunk_end = min(chunk_start + timedelta(days=chunk_days), end)
-            logger.info(f"Querying chunk: {chunk_start} -> {chunk_end} for {expr_resolved}")
-
-            try:
-                results = query_prometheus_range(expr_resolved, start=chunk_start, end=chunk_end, step=step)
-                results_list = results.get("data", {}).get("result", [])
-            except Exception as e:
-                logger.error(f"Prometheus query failed for chunk {chunk_start} -> {chunk_end}: {e}")
-                results_list = []
-
-            # Backfill if empty
-            if not results_list:
-                recording_rule_names = set(backfiller.rules_map.keys())
-                matches = re.findall(r"[a-zA-Z0-9_:]+", expr_resolved)
-                found_rules = [m for m in matches if m in recording_rule_names]
-
-                if found_rules:
-                    found_rule = found_rules[0]
-                    logger.info(f"No data in chunk, backfilling rule: {found_rule}")
-                    backfill_results = backfiller.backfill_rule_recursive(found_rule, chunk_start, chunk_end, step)
-                    results_list = backfill_results.get("data", {}).get("result", [])
-
-            # Convert Prometheus results to DataFrame
-            rows = []
-            for r in results_list:
-                metric_labels = r.get("metric", {})
-                project = metric_labels.get("project", "unknown")
-                department = metric_labels.get("department", "unknown")
-                if r.get("values"):
-                    _, value = r["values"][-1]
-                    rows.append({"project": project, "department": department, expr_resolved: float(value)})
-            if not rows:
-                rows.append({"project": "unknown", "department": "unknown", expr_resolved: 0.0})
-
-            dfs.append(pd.DataFrame(rows))
-            chunk_start = chunk_end
-
-        # Combine all chunks and sum duplicates
-        combined_df = pd.concat(dfs)
-        combined_df = combined_df.groupby(["project", "department"], as_index=False).sum()
-        return combined_df
 
     try:
         # --- Clone dashboard and extract timezone ---
@@ -85,11 +38,9 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         dashboard_tz = dash_json.get("timezone", "UTC")
         logger.info(f"Dashboard timezone = {dashboard_tz}")
 
-        # --- Compute range ---
         start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
-        logger.info(f"Querying Prometheus from {start_dt} to {end_dt}")
+        logger.info(f"Querying Prometheus from {start_dt} to {end_dt} in chunks of {chunk_hours}h")
 
-        # --- Loop panels ---
         for panel in table_panels:
             logger.info(f"Rebuilding table panel: {panel['title']}")
             panel_df = None
@@ -98,16 +49,48 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
                 metric_name = extract_metric(expr_resolved)
                 range_seconds = int((end_dt - start_dt).total_seconds())
-                logger.info(f"Processing metric: {expr_resolved}")
 
-                df = query_with_chunks(expr_resolved, start_dt, end_dt, range_seconds)
+                # Split time into chunks
+                chunk_delta = timedelta(hours=chunk_hours)
+                chunk_ranges = []
+                chunk_start = start_dt
+                while chunk_start < end_dt:
+                    chunk_end = min(chunk_start + chunk_delta, end_dt)
+                    chunk_ranges.append((chunk_start, chunk_end))
+                    chunk_start = chunk_end
+
+                # Function to query/backfill a single chunk
+                def query_chunk(chunk_range):
+                    cs, ce = chunk_range
+                    logger.info(f"[Chunk {cs} -> {ce}] Querying {metric_name}")
+                    try:
+                        results = query_prometheus_range(expr_resolved, start=cs, end=ce, step=range_seconds)
+                        results_list = results.get("data", {}).get("result", [])
+                        if not results_list:
+                            # Backfill if empty
+                            return backfiller.backfill_rule_recursive(metric_name, cs, ce, step=range_seconds)
+                        else:
+                            return backfiller._prometheus_result_to_df(results, metric_name)
+                    except Exception as e:
+                        logger.error(f"Chunk query failed for {metric_name} ({cs} -> {ce}): {e}")
+                        return pd.DataFrame(columns=["project", "department", metric_name])
+
+                # --- Parallel execution ---
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    chunk_dfs = list(executor.map(query_chunk, chunk_ranges))
+
+                # Merge all chunks
+                if chunk_dfs:
+                    df = pd.concat(chunk_dfs, ignore_index=True)
+                else:
+                    df = pd.DataFrame(columns=["project", "department", metric_name])
+
+                # Merge with previous panel_df
                 panel_df = df if panel_df is None else pd.merge(
-                    panel_df, df,
-                    on=["project", "department"],
-                    how="outer"
+                    panel_df, df, on=["project", "department"], how="outer"
                 )
 
-            # --- Save CSV if panel_df has data ---
+            # --- Save CSV ---
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
                 panel_df.rename(columns={
@@ -118,7 +101,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 }, inplace=True)
                 safe_title = re.sub(r'[^A-Za-z0-9_\-]', '_', panel['title'])
                 csv_path = os.path.join("/tmp", f"{safe_title}.csv")
-                os.makedirs(os.path.dirname(csv_path), exist_ok=True) 
+                os.makedirs(os.path.dirname(csv_path), exist_ok=True)
                 panel_df.to_csv(csv_path, index=False, sep=';', decimal=",")
                 csv_files.append(csv_path)
                 logger.info(f"CSV saved for panel '{panel['title']}': {csv_path}")
@@ -144,7 +127,6 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         generate_pdf_from_pages(pages, pdf_path)
         logger.info(f"PDF saved: {pdf_path}")
 
-        # --- Send Email ---
         if email_to:
             send_email(pdf_path, csv_files, temp_uid, email_to)
 
