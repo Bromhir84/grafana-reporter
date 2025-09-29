@@ -57,7 +57,10 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     continue
 
                 rows = []
-                for r in results.get("data", {}).get("result", []):
+                results_list = results.get("data", {}).get("result", [])
+
+                # Collect rows from results
+                for r in results_list:
                     metric_labels = r.get("metric", {})
                     project = metric_labels.get("project", "unknown")
                     department = metric_labels.get("department", "unknown")
@@ -70,21 +73,38 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                             metric_name: float(value)
                         })
 
-                if rows:
-                    df = pd.DataFrame(rows)
+                # If the query returned no results, create zeros for all known projects/departments
+                if not rows:
+                    known_keys = (
+                        panel_df[["project", "department"]].drop_duplicates().to_dict("records")
+                        if panel_df is not None else [{"project": "unknown", "department": "unknown"}]
+                    )
+                    for k in known_keys:
+                        rows.append({
+                            "project": k["project"],
+                            "department": k["department"],
+                            metric_name: 0.0
+                        })
 
-                    # Merge with previous results if needed
-                    if panel_df is None:
-                        panel_df = df
-                    else:
-                        panel_df = pd.merge(
-                            panel_df, df,
-                            on=["project", "department"],  # 👈 join on both
-                            how="outer"
-                        )
+                # Convert rows to DataFrame
+                df = pd.DataFrame(rows)
 
+                # Merge with previous panel_df
+                panel_df = df if panel_df is None else pd.merge(
+                    panel_df, df,
+                    on=["project", "department"],
+                    how="outer"
+                )
+
+            # Save CSV if panel_df has data
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
+                panel_df.rename(columns={
+                    "Runai Allocated Gpu Count": "GPU allocation hours.",
+                    "Runai Allocated Millicpus": "Allocated mCPUs",
+                    "Runai Used Cpu Cores": "CPU Usage (cores)",
+                    "Runai Used Memory Bytes": "Memory Usage (bytes)",
+                }, inplace=True)
                 safe_title = re.sub(r'[^A-Za-z0-9_\-]', '_', panel['title'])
                 csv_path = os.path.join("/tmp", f"{safe_title}.csv")
                 os.makedirs(os.path.dirname(csv_path), exist_ok=True) 
