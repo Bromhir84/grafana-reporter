@@ -59,19 +59,33 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 rows = []
                 for r in results.get("data", {}).get("result", []):
                     metric_labels = r.get("metric", {})
-                    key = metric_labels.get("project") or metric_labels.get("department") or "unknown"
+                    project = metric_labels.get("project", "unknown")
+                    department = metric_labels.get("department", "unknown")
+
                     if r.get("values"):
                         _, value = r["values"][-1]
-                        rows.append({"key": key, metric_name: float(value)})
+                        rows.append({
+                            "project": project,
+                            "department": department,
+                            metric_name: float(value)
+                        })
 
                 if rows:
                     df = pd.DataFrame(rows)
-                    panel_df = df if panel_df is None else pd.merge(panel_df, df, on="key", how="outer")
+
+                    # Merge with previous results if needed
+                    if panel_df is None:
+                        panel_df = df
+                    else:
+                        panel_df = pd.merge(
+                            panel_df, df,
+                            on=["project", "department"],  # 👈 join on both
+                            how="outer"
+                        )
 
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
-                panel_df.rename(columns={"key": "project_or_department"}, inplace=True)
-                safe_title = re.sub(r'[^A-Za-z0-9_\-]', '_', panel['title'])  # replace non-safe chars
+                safe_title = re.sub(r'[^A-Za-z0-9_\-]', '_', panel['title'])
                 csv_path = os.path.join("/tmp", f"{safe_title}.csv")
                 os.makedirs(os.path.dirname(csv_path), exist_ok=True) 
                 panel_df.to_csv(csv_path, index=False, sep=';', decimal=",")
