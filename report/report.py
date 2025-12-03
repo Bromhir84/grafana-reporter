@@ -67,7 +67,17 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                         results = query_prometheus_range(expr_resolved, start=cs, end=ce, step=total_seconds)
                         results_list = results.get("data", {}).get("result", [])
 
-                        if not results_list:
+                        # Check if results have actual data values
+                        has_data = False
+                        if results_list:
+                            for r in results_list:
+                                if r.get("values") and len(r.get("values", [])) > 0:
+                                    has_data = True
+                                    break
+                        
+                        logger.info(f"[Chunk {cs} -> {ce}] Query returned {len(results_list)} series, has_data={has_data}")
+
+                        if not has_data:
                             # Attempt to match metric_name to a recording rule
                             matching_rule = None
                             for rule_name in backfiller.rules_map:
@@ -91,7 +101,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                                     backfill_cache[cache_key] = df
                                 return df
                             else:
-                                logger.warning(f"[Chunk {cs} -> {ce}] No backfilled data found for metric: {metric_name}")
+                                logger.warning(f"[Chunk {cs} -> {ce}] No data or backfill available for metric: {metric_name}")
                                 return pd.DataFrame(columns=["project", "department", metric_name])
                         else:
                             df = backfiller._prometheus_result_to_df(results, metric_name)
