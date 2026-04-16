@@ -1,7 +1,8 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import os
-from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV
+import requests
+from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV, GRAFANA_URL, GRAFANA_API_KEY
 from .grafana_utils import clone_dashboard_without_panels, delete_dashboard, paginate_to_a4, generate_pdf_from_pages
 from .prometheus_utils import (
     compute_range_from_env,
@@ -21,6 +22,83 @@ import io
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+grafana_headers = {"Authorization": f"Bearer {GRAFANA_API_KEY}", "Content-Type": "application/json"}
+
+
+def _query_grafana_range_last(expr: str, query_spec: dict, start_dt: datetime, end_dt: datetime, interval_seconds: int):
+    """
+    Query Grafana datasource backend directly and return last value per label set.
+    This aligns execution with dashboard backend semantics better than raw Prometheus calls.
+    """
+    datasource = query_spec.get("datasource") if isinstance(query_spec, dict) else None
+    if not datasource:
+        return None
+
+    if isinstance(datasource, str):
+        if datasource.startswith("$"):
+            return None
+        datasource_obj = {"uid": datasource}
+    elif isinstance(datasource, dict):
+        datasource_obj = {k: v for k, v in datasource.items() if k in ("uid", "type") and v}
+        if not datasource_obj:
+            return None
+    else:
+        return None
+
+    from_ms = int(start_dt.astimezone(timezone.utc).timestamp() * 1000)
+    to_ms = int(end_dt.astimezone(timezone.utc).timestamp() * 1000)
+    ref_id = (query_spec.get("ref_id") if isinstance(query_spec, dict) else None) or "A"
+    max_data_points = (query_spec.get("max_data_points") if isinstance(query_spec, dict) else None) or 1000
+
+    payload = {
+        "from": str(from_ms),
+        "to": str(to_ms),
+        "queries": [
+            {
+                "refId": ref_id,
+                "expr": expr,
+                "datasource": datasource_obj,
+                "intervalMs": int(max(1, interval_seconds) * 1000),
+                "maxDataPoints": int(max_data_points),
+                "instant": False,
+                "range": True,
+            }
+        ],
+    }
+
+    response = requests.post(f"{GRAFANA_URL}/api/ds/query", headers=grafana_headers, json=payload, timeout=60)
+    response.raise_for_status()
+    data = response.json()
+
+    result_entry = data.get("results", {}).get(ref_id)
+    if not result_entry:
+        results_map = data.get("results", {})
+        if results_map:
+            result_entry = next(iter(results_map.values()))
+    if not result_entry:
+        return []
+
+    frames = result_entry.get("frames", [])
+    parsed_rows = []
+    for frame in frames:
+        schema_fields = frame.get("schema", {}).get("fields", [])
+        values_matrix = frame.get("data", {}).get("values", [])
+        if not schema_fields or not values_matrix:
+            continue
+
+        for idx, field in enumerate(schema_fields):
+            if field.get("type") != "number":
+                continue
+            col_values = values_matrix[idx] if idx < len(values_matrix) else []
+            last_value = next((v for v in reversed(col_values) if v is not None), None)
+            if last_value is None:
+                continue
+            parsed_rows.append({
+                "metric": field.get("labels", {}) or {},
+                "value": float(last_value),
+            })
+
+    return parsed_rows
 
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
@@ -105,14 +183,31 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     logger.info(f"Querying Prometheus ({mode} @ {end_dt}): {expr_resolved}")
 
                 try:
+                    grafana_rows = None
+                    if use_range_mode and isinstance(query_spec, dict):
+                        try:
+                            grafana_rows = _query_grafana_range_last(
+                                expr_resolved,
+                                query_spec,
+                                start_dt,
+                                end_dt,
+                                explicit_interval_seconds,
+                            )
+                            logger.info("Query mode: grafana-ds-query")
+                        except Exception as grafana_error:
+                            logger.warning(f"Grafana datasource query fallback to Prometheus: {grafana_error}")
+
                     if use_range_mode:
-                        results = query_prometheus_range(
-                            expr_resolved,
-                            start=start_dt,
-                            end=end_dt,
-                            step=explicit_interval_seconds,
-                            align_to_step=True,
-                        )
+                        if grafana_rows is None:
+                            results = query_prometheus_range(
+                                expr_resolved,
+                                start=start_dt,
+                                end=end_dt,
+                                step=explicit_interval_seconds,
+                                align_to_step=True,
+                            )
+                        else:
+                            results = None
                     else:
                         results = query_prometheus_instant(expr_resolved, eval_time=end_dt)
                 except Exception as e:
@@ -120,23 +215,32 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     continue
 
                 rows = []
-                for r in results.get("data", {}).get("result", []):
-                    metric_labels = r.get("metric", {})
-                    project = metric_labels.get("project", "unknown")
-                    department = metric_labels.get("department", "unknown")
+                if use_range_mode and grafana_rows is not None:
+                    for row in grafana_rows:
+                        metric_labels = row.get("metric", {})
+                        rows.append({
+                            "project": metric_labels.get("project", "unknown"),
+                            "department": metric_labels.get("department", "unknown"),
+                            metric_name: float(row.get("value", 0.0)),
+                        })
+                else:
+                    for r in results.get("data", {}).get("result", []):
+                        metric_labels = r.get("metric", {})
+                        project = metric_labels.get("project", "unknown")
+                        department = metric_labels.get("department", "unknown")
 
-                    if use_range_mode and r.get("values"):
-                        _, value = r["values"][-1]
-                    elif r.get("value"):
-                        _, value = r["value"]
-                    else:
-                        continue
+                        if use_range_mode and r.get("values"):
+                            _, value = r["values"][-1]
+                        elif r.get("value"):
+                            _, value = r["value"]
+                        else:
+                            continue
 
-                    rows.append({
-                        "project": project,
-                        "department": department,
-                        metric_name: float(value)
-                    })
+                        rows.append({
+                            "project": project,
+                            "department": department,
+                            metric_name: float(value)
+                        })
 
                 if rows:
                     df = pd.DataFrame(rows)
@@ -170,7 +274,6 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         )
         logger.info(f"Rendering dashboard at {render_url}")
 
-        import requests
         r = requests.get(render_url, stream=True, headers={"Authorization": f"Bearer {os.getenv('GRAFANA_API_KEY')}"}, timeout=60)
         r.raise_for_status()
 
