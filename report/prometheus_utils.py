@@ -123,7 +123,20 @@ def compute_query_step_seconds(start: datetime, end: datetime, max_points: int =
     """
     range_seconds = max(1, int((end - start).total_seconds()))
     dynamic_step = math.ceil(range_seconds / max(1, int(max_points)))
-    return max(int(min_step), int(dynamic_step))
+    raw_step = max(int(min_step), int(dynamic_step))
+
+    # Grafana-like rounded intervals for $__interval.
+    interval_buckets = [
+        1, 2, 5, 10, 15, 20, 30,
+        60, 120, 300, 600, 900, 1200, 1800,
+        3600, 7200, 10800, 21600, 43200,
+        86400, 604800, 2592000,
+    ]
+    for bucket in interval_buckets:
+        if raw_step <= bucket:
+            return bucket
+
+    return raw_step
 
 
 def extract_uid_from_url(url: str) -> str:
@@ -192,5 +205,17 @@ def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int 
         "step": step
     }
     resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query_range", params=params, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def query_prometheus_instant(expr: str, eval_time: datetime):
+    """Query Prometheus at an exact evaluation timestamp."""
+    eval_time_utc = eval_time.astimezone(timezone.utc)
+    params = {
+        "query": expr,
+        "time": int(eval_time_utc.timestamp()),
+    }
+    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params=params, timeout=60)
     resp.raise_for_status()
     return resp.json()

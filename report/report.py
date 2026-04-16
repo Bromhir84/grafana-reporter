@@ -7,9 +7,8 @@ from .prometheus_utils import (
     compute_range_from_env,
     extract_uid_from_url,
     resolve_grafana_vars,
-    query_prometheus_range,
+    query_prometheus_instant,
     extract_metric,
-    compute_query_step_seconds,
 )
 from .email_utils import send_email
 
@@ -47,11 +46,10 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             for expr in panel["queries"]:
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
                 metric_name = extract_metric(expr_resolved)
-                query_step = compute_query_step_seconds(start_dt, end_dt)
-                logger.info(f"Querying Prometheus: {expr_resolved}")
+                logger.info(f"Querying Prometheus (instant @ {end_dt}): {expr_resolved}")
 
                 try:
-                    results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt, step=query_step)
+                    results = query_prometheus_instant(expr_resolved, eval_time=end_dt)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
@@ -62,8 +60,8 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     project = metric_labels.get("project", "unknown")
                     department = metric_labels.get("department", "unknown")
 
-                    if r.get("values"):
-                        _, value = r["values"][-1]
+                    if r.get("value"):
+                        _, value = r["value"]
                         rows.append({
                             "project": project,
                             "department": department,
