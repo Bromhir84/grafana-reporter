@@ -41,9 +41,28 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
     dash["panels"] = filter_panels(dash.get("panels", []), excluded_titles_lower)
 
     table_panels = []
+
+    def extract_panel_reducer(panel):
+        # Try Grafana table transformations first.
+        for transformation in panel.get("transformations", []) or []:
+            if transformation.get("id") == "reduce":
+                options = transformation.get("options", {})
+                calcs = options.get("calcs") or options.get("reducers")
+                if isinstance(calcs, list) and calcs:
+                    return str(calcs[0])
+
+        # Fallback: some panels store reduce options under panel options.
+        reduce_options = panel.get("options", {}).get("reduceOptions", {})
+        calcs = reduce_options.get("calcs")
+        if isinstance(calcs, list) and calcs:
+            return str(calcs[0])
+
+        return None
+
     def walk_panels(panels):
         for panel in panels:
             if panel.get("type") == "table":
+                panel_reducer = extract_panel_reducer(panel)
                 query_specs = []
                 for target in panel.get("targets", []):
                     if "expr" not in target:
@@ -58,6 +77,7 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
                         "interval_ms": target.get("intervalMs"),
                         "max_data_points": target.get("maxDataPoints") or panel.get("maxDataPoints"),
                         "min_step": target.get("minStep") or target.get("min_interval"),
+                        "reducer": panel_reducer,
                     })
                 table_panels.append({"title": panel.get("title"), "queries": query_specs})
             if "panels" in panel:

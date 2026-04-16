@@ -83,6 +83,27 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
         return []
 
     frames = result_entry.get("frames", [])
+    reducer = (query_spec.get("reducer") if isinstance(query_spec, dict) else None) or "lastNotNull"
+
+    def reduce_values(values, reducer_name):
+        clean = [float(v) for v in values if v is not None]
+        if not clean:
+            return None
+
+        name = str(reducer_name or "lastNotNull")
+        if name in ("mean", "avg"):
+            return sum(clean) / len(clean)
+        if name == "sum":
+            return sum(clean)
+        if name == "min":
+            return min(clean)
+        if name == "max":
+            return max(clean)
+        if name in ("first", "firstNotNull"):
+            return clean[0]
+        # Default and common table reducer.
+        return clean[-1]
+
     parsed_rows = []
     for frame in frames:
         schema_fields = frame.get("schema", {}).get("fields", [])
@@ -102,17 +123,17 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
 
             # Wide frame: labels are attached to numeric field metadata.
             if field_labels.get("project") or field_labels.get("department"):
-                last_value = next((v for v in reversed(col_values) if v is not None), None)
-                if last_value is None:
+                reduced_value = reduce_values(col_values, reducer)
+                if reduced_value is None:
                     continue
                 parsed_rows.append({
                     "metric": field_labels,
-                    "value": float(last_value),
+                    "value": float(reduced_value),
                 })
                 continue
 
             # Long frame: project/department are regular string columns per row.
-            latest_by_key = {}
+            series_by_key = {}
             for row_idx in range(row_count):
                 value = col_values[row_idx] if row_idx < len(col_values) else None
                 if value is None:
@@ -127,12 +148,17 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
                         labels[label_name] = str(label_value)
 
                 key = (labels.get("project", "unknown"), labels.get("department", "unknown"))
-                latest_by_key[key] = {
-                    "metric": labels,
-                    "value": float(value),
-                }
+                entry = series_by_key.setdefault(key, {"metric": labels, "values": []})
+                entry["values"].append(value)
 
-            parsed_rows.extend(latest_by_key.values())
+            for entry in series_by_key.values():
+                reduced_value = reduce_values(entry["values"], reducer)
+                if reduced_value is None:
+                    continue
+                parsed_rows.append({
+                    "metric": entry["metric"],
+                    "value": float(reduced_value),
+                })
 
     return parsed_rows
 
@@ -212,8 +238,9 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 metric_name = extract_metric(expr_resolved)
                 mode = "range-last" if use_range_mode else "instant"
                 if use_range_mode:
+                    reducer_name = query_spec.get("reducer") if isinstance(query_spec, dict) else None
                     logger.info(
-                        f"Querying Prometheus ({mode} @ {end_dt}, step={explicit_interval_seconds}s): {expr_resolved}"
+                        f"Querying Prometheus ({mode} @ {end_dt}, step={explicit_interval_seconds}s, reducer={reducer_name or 'lastNotNull'}): {expr_resolved}"
                     )
                 else:
                     logger.info(f"Querying Prometheus ({mode} @ {end_dt}): {expr_resolved}")
