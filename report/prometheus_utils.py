@@ -8,6 +8,43 @@ from zoneinfo import ZoneInfo
 
 CEST = ZoneInfo("Europe/Amsterdam")
 
+
+def _round_grafana_time(dt: datetime, unit: str) -> datetime:
+    """Round down datetime to the start of the requested unit."""
+    if unit == "M":
+        return dt.replace(day=1, hour=0, minute=0, second=0)
+    if unit == "w":
+        return (dt - relativedelta(days=dt.weekday())).replace(hour=0, minute=0, second=0)
+    if unit == "d":
+        return dt.replace(hour=0, minute=0, second=0)
+    if unit == "h":
+        return dt.replace(minute=0, second=0)
+    if unit == "m":
+        return dt.replace(second=0)
+    if unit == "s":
+        return dt
+    return dt
+
+
+def _rounding_unit_from_expr(time_str: str):
+    m = re.search(r"/([smhdwM])$", time_str)
+    return m.group(1) if m else None
+
+
+def _end_of_rounded_period(dt: datetime, rounding_unit: str) -> datetime:
+    """Convert a rounded boundary timestamp to the end of that rounded period."""
+    if rounding_unit == "M":
+        return dt + relativedelta(months=1, seconds=-1)
+    if rounding_unit == "w":
+        return dt + relativedelta(weeks=1, seconds=-1)
+    if rounding_unit == "d":
+        return dt + relativedelta(days=1, seconds=-1)
+    if rounding_unit == "h":
+        return dt + relativedelta(hours=1, seconds=-1)
+    if rounding_unit == "m":
+        return dt + relativedelta(minutes=1, seconds=-1)
+    return dt
+
 def parse_grafana_time(time_str: str) -> datetime:
     """
     Parse Grafana time expressions like:
@@ -42,13 +79,9 @@ def parse_grafana_time(time_str: str) -> datetime:
     else:
         dt = now
 
-    if time_str.endswith("/M"):
-        dt = dt.replace(day=1, hour=0, minute=0, second=0)
-    elif time_str.endswith("/d"):
-        dt = dt.replace(hour=0, minute=0, second=0)
-    elif time_str.endswith("/w"):
-        dt = dt - relativedelta(days=dt.weekday())
-        dt = dt.replace(hour=0, minute=0, second=0)
+    rounding_unit = _rounding_unit_from_expr(time_str)
+    if rounding_unit:
+        dt = _round_grafana_time(dt, rounding_unit)
 
     return dt
 
@@ -56,6 +89,12 @@ def compute_range_from_env(time_from: str, time_to: str):
     """Return start and end datetime based on TIME_FROM and TIME_TO (CEST-aware)."""
     start = parse_grafana_time(time_from)
     end = parse_grafana_time(time_to)
+
+    # For rounded upper bounds (for example now-1M/M), use end-of-period.
+    rounding_unit = _rounding_unit_from_expr(time_to)
+    if rounding_unit:
+        end = _end_of_rounded_period(end, rounding_unit)
+
     return start, end
 
 
