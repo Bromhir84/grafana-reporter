@@ -97,7 +97,12 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 use_range_mode = (instant_flag is False) if instant_flag is not None else uses_subquery
                 metric_name = extract_metric(expr_resolved)
                 mode = "range-last" if use_range_mode else "instant"
-                logger.info(f"Querying Prometheus ({mode} @ {end_dt}): {expr_resolved}")
+                if use_range_mode:
+                    logger.info(
+                        f"Querying Prometheus ({mode} @ {end_dt}, step={explicit_interval_seconds}s): {expr_resolved}"
+                    )
+                else:
+                    logger.info(f"Querying Prometheus ({mode} @ {end_dt}): {expr_resolved}")
 
                 try:
                     if use_range_mode:
@@ -106,6 +111,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                             start=start_dt,
                             end=end_dt,
                             step=explicit_interval_seconds,
+                            align_to_step=True,
                         )
                     else:
                         results = query_prometheus_instant(expr_resolved, eval_time=end_dt)

@@ -235,13 +235,23 @@ def extract_metric(expr: str) -> str:
     return "Unknown Metric"
 
 
-def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int = 3600):
+def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int = 3600, align_to_step: bool = False):
     start_utc = start.astimezone(timezone.utc)
     end_utc = end.astimezone(timezone.utc)
+    start_ts = int(start_utc.timestamp())
+    end_ts = int(end_utc.timestamp())
+
+    if align_to_step and step > 0:
+        # Grafana commonly aligns range boundaries to step for stable reduction results.
+        start_ts = (start_ts // step) * step
+        end_ts = (end_ts // step) * step
+        if end_ts < start_ts:
+            end_ts = start_ts
+
     params = {
         "query": expr,
-        "start": int(start_utc.timestamp()),
-        "end": int(end_utc.timestamp()),
+        "start": start_ts,
+        "end": end_ts,
         "step": step
     }
     resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query_range", params=params, timeout=60)
