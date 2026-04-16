@@ -3,7 +3,7 @@ import requests
 import math
 from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
-from ..config import PROMETHEUS_URL
+from ..config import PROMETHEUS_URL, TIME_TO_ROUND_TO_PERIOD_END
 from zoneinfo import ZoneInfo
 
 CEST = ZoneInfo("Europe/Amsterdam")
@@ -90,10 +90,11 @@ def compute_range_from_env(time_from: str, time_to: str):
     start = parse_grafana_time(time_from)
     end = parse_grafana_time(time_to)
 
-    # For rounded upper bounds (for example now-1M/M), use end-of-period.
-    rounding_unit = _rounding_unit_from_expr(time_to)
-    if rounding_unit:
-        end = _end_of_rounded_period(end, rounding_unit)
+    # Optional behavior: expand rounded upper bounds (e.g. now-1M/M) to end-of-period.
+    if TIME_TO_ROUND_TO_PERIOD_END:
+        rounding_unit = _rounding_unit_from_expr(time_to)
+        if rounding_unit:
+            end = _end_of_rounded_period(end, rounding_unit)
 
     return start, end
 
@@ -139,6 +140,42 @@ def compute_query_step_seconds(start: datetime, end: datetime, max_points: int =
     return raw_step
 
 
+def parse_duration_to_seconds(value) -> int | None:
+    """Parse Grafana/Prometheus duration strings into seconds."""
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Grafana min interval values may be prefixed with '>'
+    text = text.lstrip(">")
+
+    # Ignore unresolved macros; caller should provide fallback.
+    if text in ("$__interval", "${__interval}"):
+        return None
+
+    if text.endswith("ms") and text[:-2].isdigit():
+        return max(1, math.ceil(int(text[:-2]) / 1000))
+
+    m = re.match(r"^(\d+)([smhdwM])$", text)
+    if not m:
+        return None
+
+    value_num = int(m.group(1))
+    unit = m.group(2)
+    multipliers = {
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+        "w": 7 * 86400,
+        "M": 30 * 86400,
+    }
+    return value_num * multipliers[unit]
+
+
 def extract_uid_from_url(url: str) -> str:
     match = re.search(r"/d/([^/]+)/", url)
     if match:
@@ -146,9 +183,10 @@ def extract_uid_from_url(url: str) -> str:
     raise ValueError("Invalid dashboard URL format. Expected /d/<uid>/")
 
 
-def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime) -> str:
+def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime, interval_seconds: int | None = None) -> str:
     range_seconds = max(1, int((end - start).total_seconds()))
-    interval_seconds = compute_query_step_seconds(start, end)
+    if interval_seconds is None:
+        interval_seconds = compute_query_step_seconds(start, end)
 
     macro_values = {
         "$__range": _seconds_to_prom_duration(range_seconds),

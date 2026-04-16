@@ -44,8 +44,18 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
     def walk_panels(panels):
         for panel in panels:
             if panel.get("type") == "table":
-                exprs = [t["expr"] for t in panel.get("targets", []) if "expr" in t]
-                table_panels.append({"title": panel.get("title"), "queries": exprs})
+                query_specs = []
+                for target in panel.get("targets", []):
+                    if "expr" not in target:
+                        continue
+                    query_specs.append({
+                        "expr": target["expr"],
+                        "interval": target.get("interval") or panel.get("interval"),
+                        "interval_ms": target.get("intervalMs"),
+                        "max_data_points": target.get("maxDataPoints") or panel.get("maxDataPoints"),
+                        "min_step": target.get("minStep") or target.get("min_interval"),
+                    })
+                table_panels.append({"title": panel.get("title"), "queries": query_specs})
             if "panels" in panel:
                 walk_panels(panel["panels"])
     walk_panels(dash.get("panels", []))

@@ -9,6 +9,8 @@ from .prometheus_utils import (
     resolve_grafana_vars,
     query_prometheus_instant,
     extract_metric,
+    compute_query_step_seconds,
+    parse_duration_to_seconds,
 )
 from .email_utils import send_email
 
@@ -43,8 +45,48 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             logger.info(f"Rebuilding table panel: {panel['title']}")
             panel_df = None
 
-            for expr in panel["queries"]:
-                expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
+            for query_spec in panel["queries"]:
+                if isinstance(query_spec, str):
+                    expr = query_spec
+                    explicit_interval_seconds = None
+                else:
+                    expr = query_spec.get("expr", "")
+                    interval_ms = query_spec.get("interval_ms")
+                    interval_from_text = parse_duration_to_seconds(query_spec.get("interval"))
+                    min_step_seconds = parse_duration_to_seconds(query_spec.get("min_step"))
+                    max_data_points = query_spec.get("max_data_points")
+
+                    explicit_interval_seconds = None
+                    if interval_ms not in (None, ""):
+                        try:
+                            explicit_interval_seconds = max(1, int(interval_ms) // 1000)
+                        except (TypeError, ValueError):
+                            explicit_interval_seconds = None
+                    if explicit_interval_seconds is None:
+                        explicit_interval_seconds = interval_from_text
+
+                    if explicit_interval_seconds is None:
+                        try:
+                            max_points = int(max_data_points) if max_data_points not in (None, "") else 1000
+                        except (TypeError, ValueError):
+                            max_points = 1000
+                        explicit_interval_seconds = compute_query_step_seconds(
+                            start_dt,
+                            end_dt,
+                            max_points=max_points,
+                            min_step=min_step_seconds or 60,
+                        )
+
+                if not expr:
+                    continue
+
+                expr_resolved = resolve_grafana_vars(
+                    expr,
+                    GRAFANA_VARS,
+                    start_dt,
+                    end_dt,
+                    interval_seconds=explicit_interval_seconds,
+                )
                 metric_name = extract_metric(expr_resolved)
                 logger.info(f"Querying Prometheus (instant @ {end_dt}): {expr_resolved}")
 
