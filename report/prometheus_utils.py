@@ -8,7 +8,7 @@ from ..config import PROMETHEUS_URL
 from zoneinfo import ZoneInfo
 
 CEST = ZoneInfo("Europe/Amsterdam")
-TIME_TO_ROUND_TO_PERIOD_END = os.getenv("TIME_TO_ROUND_TO_PERIOD_END", "false").lower() == "true"
+TIME_TO_ROUND_TO_PERIOD_END = os.getenv("TIME_TO_ROUND_TO_PERIOD_END", "true").lower() == "true"
 
 
 def _round_grafana_time(dt: datetime, unit: str) -> datetime:
