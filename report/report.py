@@ -8,6 +8,7 @@ from .prometheus_utils import (
     extract_uid_from_url,
     resolve_grafana_vars,
     query_prometheus_instant,
+    query_prometheus_range,
     extract_metric,
     compute_query_step_seconds,
     parse_duration_to_seconds,
@@ -87,11 +88,24 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     end_dt,
                     interval_seconds=explicit_interval_seconds,
                 )
+                if explicit_interval_seconds is None:
+                    explicit_interval_seconds = compute_query_step_seconds(start_dt, end_dt)
+
+                uses_subquery = bool(re.search(r"\[[^\]]+:[^\]]+\]", expr_resolved))
                 metric_name = extract_metric(expr_resolved)
-                logger.info(f"Querying Prometheus (instant @ {end_dt}): {expr_resolved}")
+                mode = "range-last" if uses_subquery else "instant"
+                logger.info(f"Querying Prometheus ({mode} @ {end_dt}): {expr_resolved}")
 
                 try:
-                    results = query_prometheus_instant(expr_resolved, eval_time=end_dt)
+                    if uses_subquery:
+                        results = query_prometheus_range(
+                            expr_resolved,
+                            start=start_dt,
+                            end=end_dt,
+                            step=explicit_interval_seconds,
+                        )
+                    else:
+                        results = query_prometheus_instant(expr_resolved, eval_time=end_dt)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
@@ -102,13 +116,18 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     project = metric_labels.get("project", "unknown")
                     department = metric_labels.get("department", "unknown")
 
-                    if r.get("value"):
+                    if uses_subquery and r.get("values"):
+                        _, value = r["values"][-1]
+                    elif r.get("value"):
                         _, value = r["value"]
-                        rows.append({
-                            "project": project,
-                            "department": department,
-                            metric_name: float(value)
-                        })
+                    else:
+                        continue
+
+                    rows.append({
+                        "project": project,
+                        "department": department,
+                        metric_name: float(value)
+                    })
 
                 if rows:
                     df = pd.DataFrame(rows)

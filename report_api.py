@@ -6,6 +6,7 @@ import re
 import io
 import csv
 import time
+import math
 import img2pdf
 import requests
 from datetime import datetime
@@ -65,6 +66,43 @@ class ReportRequest(BaseModel):
     email_report: bool = False
     email_to: str = None
 
+
+def _round_grafana_time(dt: datetime, unit: str) -> datetime:
+    """Round down datetime to the start of the requested unit."""
+    if unit == "M":
+        return dt.replace(day=1, hour=0, minute=0, second=0)
+    if unit == "w":
+        return (dt - relativedelta(days=dt.weekday())).replace(hour=0, minute=0, second=0)
+    if unit == "d":
+        return dt.replace(hour=0, minute=0, second=0)
+    if unit == "h":
+        return dt.replace(minute=0, second=0)
+    if unit == "m":
+        return dt.replace(second=0)
+    if unit == "s":
+        return dt
+    return dt
+
+
+def _rounding_unit_from_expr(time_str: str):
+    m = re.search(r"/([smhdwM])$", time_str)
+    return m.group(1) if m else None
+
+
+def _end_of_rounded_period(dt: datetime, rounding_unit: str) -> datetime:
+    """Convert a rounded boundary timestamp to the end of that rounded period."""
+    if rounding_unit == "M":
+        return dt + relativedelta(months=1, seconds=-1)
+    if rounding_unit == "w":
+        return dt + relativedelta(weeks=1, seconds=-1)
+    if rounding_unit == "d":
+        return dt + relativedelta(days=1, seconds=-1)
+    if rounding_unit == "h":
+        return dt + relativedelta(hours=1, seconds=-1)
+    if rounding_unit == "m":
+        return dt + relativedelta(minutes=1, seconds=-1)
+    return dt
+
 def parse_grafana_time(time_str: str) -> datetime:
     """
     Parse Grafana time expressions like:
@@ -101,15 +139,10 @@ def parse_grafana_time(time_str: str) -> datetime:
     else:
         dt = now
 
-    # Snap to start of period if /M, /d, /w
-    if time_str.endswith("/M"):
-        dt = dt.replace(day=1, hour=0, minute=0, second=0)
-    elif time_str.endswith("/d"):
-        dt = dt.replace(hour=0, minute=0, second=0)
-    elif time_str.endswith("/w"):
-        # Snap to previous Monday
-        dt = dt - relativedelta(days=dt.weekday())
-        dt = dt.replace(hour=0, minute=0, second=0)
+    # Snap to start of rounded period if /unit is provided.
+    rounding_unit = _rounding_unit_from_expr(time_str)
+    if rounding_unit:
+        dt = _round_grafana_time(dt, rounding_unit)
 
     return dt
 
@@ -117,6 +150,12 @@ def compute_range_from_env(time_from: str, time_to: str):
     """Return start and end datetime based on TIME_FROM and TIME_TO."""
     start = parse_grafana_time(time_from)
     end = parse_grafana_time(time_to)
+
+    # For rounded upper bounds (for example now-1M/M), use end-of-period.
+    rounding_unit = _rounding_unit_from_expr(time_to)
+    if rounding_unit:
+        end = _end_of_rounded_period(end, rounding_unit)
+
     return start, end
 
 def compute_prometheus_duration(start: datetime, end: datetime) -> str:
@@ -126,6 +165,36 @@ def compute_prometheus_duration(start: datetime, end: datetime) -> str:
     # We'll convert everything to hours for convenience
     hours = int(delta.total_seconds() / 3600)
     return f"{hours}h"
+
+
+def _seconds_to_prom_duration(seconds: int) -> str:
+    seconds = max(1, int(seconds))
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def compute_query_step_seconds(start: datetime, end: datetime, max_points: int = 1000, min_step: int = 60) -> int:
+    range_seconds = max(1, int((end - start).total_seconds()))
+    dynamic_step = math.ceil(range_seconds / max(1, int(max_points)))
+    raw_step = max(int(min_step), int(dynamic_step))
+
+    # Grafana-like rounded intervals for $__interval.
+    interval_buckets = [
+        1, 2, 5, 10, 15, 20, 30,
+        60, 120, 300, 600, 900, 1200, 1800,
+        3600, 7200, 10800, 21600, 43200,
+        86400, 604800, 2592000,
+    ]
+    for bucket in interval_buckets:
+        if raw_step <= bucket:
+            return bucket
+
+    return raw_step
 
 def extract_uid_from_url(url: str) -> str:
     match = re.search(r"/d/([^/]+)/", url)
@@ -224,16 +293,34 @@ def extract_grafana_vars(dashboard_json):
 
 def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime) -> str:
     """Replace Grafana template variables with Prometheus-compatible values."""
+    range_seconds = max(1, int((end - start).total_seconds()))
+    interval_seconds = compute_query_step_seconds(start, end)
+
+    macro_values = {
+        "$__range": _seconds_to_prom_duration(range_seconds),
+        "${__range}": _seconds_to_prom_duration(range_seconds),
+        "$__range_s": str(range_seconds),
+        "${__range_s}": str(range_seconds),
+        "$__range_ms": str(range_seconds * 1000),
+        "${__range_ms}": str(range_seconds * 1000),
+        "$__interval": _seconds_to_prom_duration(interval_seconds),
+        "${__interval}": _seconds_to_prom_duration(interval_seconds),
+        "$__interval_ms": str(interval_seconds * 1000),
+        "${__interval_ms}": str(interval_seconds * 1000),
+        "$__rate_interval": _seconds_to_prom_duration(max(60, interval_seconds * 4)),
+        "${__rate_interval}": _seconds_to_prom_duration(max(60, interval_seconds * 4)),
+    }
+
+    for macro, replacement in macro_values.items():
+        query = query.replace(macro, replacement)
+
     for var, value in variables.items():
         # Convert Grafana's $__all into regex match-all
         if not value or value in ("$__all", "['$__all']"):
             value = ".*"
         query = query.replace(f"${var}", value)
         query = query.replace(f"${{{var}}}", value)
-    
-    # Replace $__range with the correct duration
-    query = query.replace("$__range", compute_prometheus_duration(start, end))
-    
+
     return query
 
 def extract_metric(expr: str) -> str:
@@ -289,6 +376,17 @@ def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int 
     resp.raise_for_status()
     return resp.json()
 
+
+def query_prometheus_instant(expr: str, eval_time: datetime):
+    """Query Prometheus at an exact evaluation timestamp."""
+    params = {
+        "query": expr,
+        "time": int(eval_time.timestamp()),
+    }
+    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params=params, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     """
     Generate a Grafana report:
@@ -318,14 +416,14 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             for expr in panel["queries"]:
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
                 metric_name = extract_metric(expr_resolved)
-                range_seconds = int((end_dt - start_dt).total_seconds())
+                query_step = compute_query_step_seconds(start_dt, end_dt)
                 logger.info(
-                    f"Querying Prometheus for panel '{panel['title']}':\n{expr_resolved}\n"
+                    f"Querying Prometheus (instant @ {end_dt}) for panel '{panel['title']}':\n{expr_resolved}\n"
                     f"Start: {start_dt}, End: {end_dt}"
                 )
 
                 try:
-                    results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt, step=range_seconds)
+                    results = query_prometheus_instant(expr_resolved, eval_time=end_dt)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
@@ -335,9 +433,8 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     metric_labels = r.get("metric", {})
                     key = metric_labels.get("project") or metric_labels.get("department") or "unknown"
 
-                    if r.get("values"):
-                        # take last datapoint
-                        _, value = r["values"][-1]
+                    if r.get("value"):
+                        _, value = r["value"]
                         rows.append({"key": key, metric_name: float(value)})
 
                 if rows:
