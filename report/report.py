@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 grafana_headers = {"Authorization": f"Bearer {GRAFANA_API_KEY}", "Content-Type": "application/json"}
 
 
-def _query_grafana_range_last(expr: str, query_spec: dict, start_dt: datetime, end_dt: datetime, interval_seconds: int):
+def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, start_dt: datetime, end_dt: datetime, interval_seconds: int):
     """
     Query Grafana datasource backend directly and return last value per label set.
     This aligns execution with dashboard backend semantics better than raw Prometheus calls.
@@ -62,6 +62,10 @@ def _query_grafana_range_last(expr: str, query_spec: dict, start_dt: datetime, e
                 "maxDataPoints": int(max_data_points),
                 "instant": False,
                 "range": True,
+                "scopedVars": {
+                    name: {"text": str(value), "value": value}
+                    for name, value in variables.items()
+                },
             }
         ],
     }
@@ -86,17 +90,49 @@ def _query_grafana_range_last(expr: str, query_spec: dict, start_dt: datetime, e
         if not schema_fields or not values_matrix:
             continue
 
-        for idx, field in enumerate(schema_fields):
-            if field.get("type") != "number":
-                continue
+        field_names = [field.get("name", "") for field in schema_fields]
+        numeric_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "number"]
+        string_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "string"]
+        row_count = max((len(col) for col in values_matrix), default=0)
+
+        for idx in numeric_indexes:
+            field = schema_fields[idx]
             col_values = values_matrix[idx] if idx < len(values_matrix) else []
-            last_value = next((v for v in reversed(col_values) if v is not None), None)
-            if last_value is None:
+            field_labels = field.get("labels", {}) or {}
+
+            # Wide frame: labels are attached to numeric field metadata.
+            if field_labels.get("project") or field_labels.get("department"):
+                last_value = next((v for v in reversed(col_values) if v is not None), None)
+                if last_value is None:
+                    continue
+                parsed_rows.append({
+                    "metric": field_labels,
+                    "value": float(last_value),
+                })
                 continue
-            parsed_rows.append({
-                "metric": field.get("labels", {}) or {},
-                "value": float(last_value),
-            })
+
+            # Long frame: project/department are regular string columns per row.
+            latest_by_key = {}
+            for row_idx in range(row_count):
+                value = col_values[row_idx] if row_idx < len(col_values) else None
+                if value is None:
+                    continue
+
+                labels = dict(field_labels)
+                for sidx in string_indexes:
+                    label_name = field_names[sidx]
+                    label_value_col = values_matrix[sidx] if sidx < len(values_matrix) else []
+                    label_value = label_value_col[row_idx] if row_idx < len(label_value_col) else None
+                    if label_name in ("project", "department") and label_value is not None:
+                        labels[label_name] = str(label_value)
+
+                key = (labels.get("project", "unknown"), labels.get("department", "unknown"))
+                latest_by_key[key] = {
+                    "metric": labels,
+                    "value": float(value),
+                }
+
+            parsed_rows.extend(latest_by_key.values())
 
     return parsed_rows
 
@@ -187,8 +223,9 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     if use_range_mode and isinstance(query_spec, dict):
                         try:
                             grafana_rows = _query_grafana_range_last(
-                                expr_resolved,
+                                expr,
                                 query_spec,
+                                GRAFANA_VARS,
                                 start_dt,
                                 end_dt,
                                 explicit_interval_seconds,
