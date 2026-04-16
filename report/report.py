@@ -85,24 +85,37 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
     frames = result_entry.get("frames", [])
     reducer = (query_spec.get("reducer") if isinstance(query_spec, dict) else None) or "lastNotNull"
 
-    def reduce_values(values, reducer_name):
-        clean = [float(v) for v in values if v is not None]
-        if not clean:
+    def reduce_values(values, reducer_name, timestamps=None):
+        pairs = []
+        for i, value in enumerate(values):
+            if value is None:
+                continue
+            ts = None
+            if timestamps is not None and i < len(timestamps):
+                ts = timestamps[i]
+            pairs.append((ts, float(value)))
+
+        if not pairs:
             return None
 
         name = str(reducer_name or "lastNotNull")
+        numeric_values = [v for _, v in pairs]
         if name in ("mean", "avg"):
-            return sum(clean) / len(clean)
+            return sum(numeric_values) / len(numeric_values)
         if name == "sum":
-            return sum(clean)
+            return sum(numeric_values)
         if name == "min":
-            return min(clean)
+            return min(numeric_values)
         if name == "max":
-            return max(clean)
+            return max(numeric_values)
         if name in ("first", "firstNotNull"):
-            return clean[0]
+            if any(ts is not None for ts, _ in pairs):
+                return min(pairs, key=lambda p: (p[0] is None, p[0]))[1]
+            return numeric_values[0]
         # Default and common table reducer.
-        return clean[-1]
+        if any(ts is not None for ts, _ in pairs):
+            return max(pairs, key=lambda p: (p[0] is None, p[0]))[1]
+        return numeric_values[-1]
 
     parsed_rows = []
     for frame in frames:
@@ -114,6 +127,8 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
         field_names = [field.get("name", "") for field in schema_fields]
         numeric_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "number"]
         string_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "string"]
+        time_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "time"]
+        time_values = values_matrix[time_indexes[0]] if time_indexes and time_indexes[0] < len(values_matrix) else None
         row_count = max((len(col) for col in values_matrix), default=0)
 
         for idx in numeric_indexes:
@@ -123,7 +138,7 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
 
             # Wide frame: labels are attached to numeric field metadata.
             if field_labels.get("project") or field_labels.get("department"):
-                reduced_value = reduce_values(col_values, reducer)
+                reduced_value = reduce_values(col_values, reducer, time_values)
                 if reduced_value is None:
                     continue
                 parsed_rows.append({
@@ -138,6 +153,7 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
                 value = col_values[row_idx] if row_idx < len(col_values) else None
                 if value is None:
                     continue
+                ts = time_values[row_idx] if time_values is not None and row_idx < len(time_values) else None
 
                 labels = dict(field_labels)
                 for sidx in string_indexes:
@@ -149,10 +165,12 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
 
                 key = (labels.get("project", "unknown"), labels.get("department", "unknown"))
                 entry = series_by_key.setdefault(key, {"metric": labels, "values": []})
-                entry["values"].append(value)
+                entry["values"].append((ts, value))
 
             for entry in series_by_key.values():
-                reduced_value = reduce_values(entry["values"], reducer)
+                series_timestamps = [ts for ts, _ in entry["values"]]
+                series_values = [v for _, v in entry["values"]]
+                reduced_value = reduce_values(series_values, reducer, series_timestamps)
                 if reduced_value is None:
                     continue
                 parsed_rows.append({
