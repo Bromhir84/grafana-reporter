@@ -50,6 +50,8 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
                         continue
                     query_specs.append({
                         "expr": target["expr"],
+                        "instant": target.get("instant"),
+                        "range": target.get("range"),
                         "interval": target.get("interval") or panel.get("interval"),
                         "interval_ms": target.get("intervalMs"),
                         "max_data_points": target.get("maxDataPoints") or panel.get("maxDataPoints"),

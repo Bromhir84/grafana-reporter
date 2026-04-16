@@ -50,8 +50,10 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 if isinstance(query_spec, str):
                     expr = query_spec
                     explicit_interval_seconds = None
+                    instant_flag = None
                 else:
                     expr = query_spec.get("expr", "")
+                    instant_flag = query_spec.get("instant")
                     interval_ms = query_spec.get("interval_ms")
                     interval_from_text = parse_duration_to_seconds(query_spec.get("interval"))
                     min_step_seconds = parse_duration_to_seconds(query_spec.get("min_step"))
@@ -92,12 +94,13 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     explicit_interval_seconds = compute_query_step_seconds(start_dt, end_dt)
 
                 uses_subquery = bool(re.search(r"\[[^\]]+:[^\]]+\]", expr_resolved))
+                use_range_mode = (instant_flag is False) if instant_flag is not None else uses_subquery
                 metric_name = extract_metric(expr_resolved)
-                mode = "range-last" if uses_subquery else "instant"
+                mode = "range-last" if use_range_mode else "instant"
                 logger.info(f"Querying Prometheus ({mode} @ {end_dt}): {expr_resolved}")
 
                 try:
-                    if uses_subquery:
+                    if use_range_mode:
                         results = query_prometheus_range(
                             expr_resolved,
                             start=start_dt,
@@ -116,7 +119,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     project = metric_labels.get("project", "unknown")
                     department = metric_labels.get("department", "unknown")
 
-                    if uses_subquery and r.get("values"):
+                    if use_range_mode and r.get("values"):
                         _, value = r["values"][-1]
                     elif r.get("value"):
                         _, value = r["value"]
