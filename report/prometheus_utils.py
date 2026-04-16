@@ -1,5 +1,6 @@
 import re
 import requests
+import math
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from ..config import PROMETHEUS_URL
@@ -64,6 +65,28 @@ def compute_prometheus_duration(start, end) -> str:
     return f"{hours}h"
 
 
+def _seconds_to_prom_duration(seconds: int) -> str:
+    """Convert seconds to a compact Prometheus duration string."""
+    seconds = max(1, int(seconds))
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def compute_query_step_seconds(start: datetime, end: datetime, max_points: int = 1000, min_step: int = 60) -> int:
+    """
+    Compute a query_range step that keeps result cardinality bounded.
+    Mirrors Grafana behavior by deriving interval from total range / max data points.
+    """
+    range_seconds = max(1, int((end - start).total_seconds()))
+    dynamic_step = math.ceil(range_seconds / max(1, int(max_points)))
+    return max(int(min_step), int(dynamic_step))
+
+
 def extract_uid_from_url(url: str) -> str:
     match = re.search(r"/d/([^/]+)/", url)
     if match:
@@ -72,11 +95,32 @@ def extract_uid_from_url(url: str) -> str:
 
 
 def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: datetime) -> str:
+    range_seconds = max(1, int((end - start).total_seconds()))
+    interval_seconds = compute_query_step_seconds(start, end)
+
+    macro_values = {
+        "$__range": _seconds_to_prom_duration(range_seconds),
+        "${__range}": _seconds_to_prom_duration(range_seconds),
+        "$__range_s": str(range_seconds),
+        "${__range_s}": str(range_seconds),
+        "$__range_ms": str(range_seconds * 1000),
+        "${__range_ms}": str(range_seconds * 1000),
+        "$__interval": _seconds_to_prom_duration(interval_seconds),
+        "${__interval}": _seconds_to_prom_duration(interval_seconds),
+        "$__interval_ms": str(interval_seconds * 1000),
+        "${__interval_ms}": str(interval_seconds * 1000),
+        "$__rate_interval": _seconds_to_prom_duration(max(60, interval_seconds * 4)),
+        "${__rate_interval}": _seconds_to_prom_duration(max(60, interval_seconds * 4)),
+    }
+
+    for macro, replacement in macro_values.items():
+        query = query.replace(macro, replacement)
+
     for var, value in variables.items():
         if not value or value in ("$__all", "['$__all']"):
             value = ".*"
         query = query.replace(f"${var}", value).replace(f"${{{var}}}", value)
-    query = query.replace("$__range", compute_prometheus_duration(start, end))
+
     return query
 
 
