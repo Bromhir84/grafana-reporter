@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime
 import os
-import pytz
 from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV
 from .grafana_utils import clone_dashboard_without_panels, delete_dashboard, paginate_to_a4, generate_pdf_from_pages
 from .prometheus_utils import (
@@ -9,7 +8,8 @@ from .prometheus_utils import (
     extract_uid_from_url,
     resolve_grafana_vars,
     query_prometheus_range,
-    extract_metric
+    extract_metric,
+    compute_query_step_seconds,
 )
 from .email_utils import send_email
 
@@ -47,11 +47,11 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             for expr in panel["queries"]:
                 expr_resolved = resolve_grafana_vars(expr, GRAFANA_VARS, start_dt, end_dt)
                 metric_name = extract_metric(expr_resolved)
-                range_seconds = int((end_dt - start_dt).total_seconds())
+                query_step = compute_query_step_seconds(start_dt, end_dt)
                 logger.info(f"Querying Prometheus: {expr_resolved}")
 
                 try:
-                    results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt, step=range_seconds)
+                    results = query_prometheus_range(expr_resolved, start=start_dt, end=end_dt, step=query_step)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue

@@ -1,12 +1,12 @@
 import re
 import requests
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
 from ..config import PROMETHEUS_URL
-import pytz
+from zoneinfo import ZoneInfo
 
-CEST = pytz.timezone("Europe/Amsterdam")
+CEST = ZoneInfo("Europe/Amsterdam")
 
 def parse_grafana_time(time_str: str) -> datetime:
     """
@@ -144,8 +144,8 @@ def extract_metric(expr: str) -> str:
 
 
 def query_prometheus_range(expr: str, start: datetime, end: datetime, step: int = 3600):
-    start_utc = start.astimezone(pytz.utc)
-    end_utc = end.astimezone(pytz.utc)
+    start_utc = start.astimezone(timezone.utc)
+    end_utc = end.astimezone(timezone.utc)
     params = {
         "query": expr,
         "start": int(start_utc.timestamp()),
