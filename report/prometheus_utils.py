@@ -1,12 +1,14 @@
 import re
+import os
 import requests
 import math
 from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
-from ..config import PROMETHEUS_URL, TIME_TO_ROUND_TO_PERIOD_END
+from ..config import PROMETHEUS_URL
 from zoneinfo import ZoneInfo
 
 CEST = ZoneInfo("Europe/Amsterdam")
+TIME_TO_ROUND_TO_PERIOD_END = os.getenv("TIME_TO_ROUND_TO_PERIOD_END", "false").lower() == "true"
 
 
 def _round_grafana_time(dt: datetime, unit: str) -> datetime:
