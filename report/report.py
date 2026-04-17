@@ -176,6 +176,31 @@ def _query_grafana_range_last(
     reducer = (query_spec.get("reducer") if isinstance(query_spec, dict) else None) or "lastNotNull"
     logger.info("Grafana ds/query refId=%s returned %d frames", ref_id, len(frames))
 
+    def select_terminal_sample(values, timestamps=None):
+        if timestamps is not None:
+            last_ts = None
+            last_value = None
+            for i, original in enumerate(values):
+                if original is None:
+                    continue
+                ts = timestamps[i] if i < len(timestamps) else None
+                if ts is None:
+                    continue
+                if last_ts is None or ts >= last_ts:
+                    last_ts = ts
+                    last_value = float(original)
+            if last_value is not None:
+                return last_ts, last_value
+
+        for i in range(len(values) - 1, -1, -1):
+            original = values[i]
+            if original is None:
+                continue
+            ts = timestamps[i] if timestamps is not None and i < len(timestamps) else None
+            return ts, float(original)
+
+        return None, None
+
     def reduce_values(values, reducer_name, timestamps=None):
         pairs = []
         for i, value in enumerate(values):
@@ -216,25 +241,8 @@ def _query_grafana_range_last(
                     return first_value
             return numeric_values[0]
         if name in ("last", "lastNotNull"):
-            if timestamps is not None:
-                last_ts = None
-                last_value = None
-                for i, original in enumerate(values):
-                    if original is None:
-                        continue
-                    ts = timestamps[i] if i < len(timestamps) else None
-                    if ts is None:
-                        continue
-                    if last_ts is None or ts >= last_ts:
-                        last_ts = ts
-                        last_value = float(original)
-                if last_value is not None:
-                    return last_value
-            # Fallback when no timestamps are available.
-            for original in reversed(values):
-                if original is not None:
-                    return float(original)
-            return None
+            _, last_value = select_terminal_sample(values, timestamps)
+            return last_value
         # Default and common table reducer.
         return numeric_values[-1]
 
@@ -245,7 +253,8 @@ def _query_grafana_range_last(
         if not schema_fields or not values_matrix:
             continue
 
-        frame_executed_query = (((frame.get("schema") or {}).get("meta") or {}).get("custom") or {}).get("executedQueryString")
+        frame_meta = ((frame.get("schema") or {}).get("meta") or {})
+        frame_executed_query = frame_meta.get("executedQueryString") or ((frame_meta.get("custom") or {}).get("executedQueryString"))
         if frame_executed_query and frame_idx < 3:
             logger.info("Grafana executed query (%s frame[%d]): %s", ref_id, frame_idx, frame_executed_query)
 
@@ -270,15 +279,19 @@ def _query_grafana_range_last(
 
             # Wide frame: labels are attached to numeric field metadata.
             if field_labels.get("project") or field_labels.get("department"):
+                selected_ts, selected_value = select_terminal_sample(col_values, time_values)
                 reduced_value = reduce_values(col_values, reducer, time_values)
                 if reduced_value is None:
                     continue
                 logger.info(
-                    "Grafana parsed value refId=%s project=%s department=%s value=%s",
+                    "Grafana parsed value refId=%s project=%s department=%s value=%s selectedTs=%s selectedValue=%s lastRawValue=%s",
                     ref_id,
                     field_labels.get("project", "unknown"),
                     field_labels.get("department", "unknown"),
                     str(float(reduced_value)),
+                    str(selected_ts),
+                    str(selected_value),
+                    str(col_values[-1] if col_values else None),
                 )
                 parsed_rows.append({
                     "metric": field_labels,
@@ -309,15 +322,19 @@ def _query_grafana_range_last(
             for entry in series_by_key.values():
                 series_timestamps = [ts for ts, _ in entry["values"]]
                 series_values = [v for _, v in entry["values"]]
+                selected_ts, selected_value = select_terminal_sample(series_values, series_timestamps)
                 reduced_value = reduce_values(series_values, reducer, series_timestamps)
                 if reduced_value is None:
                     continue
                 logger.info(
-                    "Grafana parsed value refId=%s project=%s department=%s value=%s",
+                    "Grafana parsed value refId=%s project=%s department=%s value=%s selectedTs=%s selectedValue=%s lastRawValue=%s",
                     ref_id,
                     entry["metric"].get("project", "unknown"),
                     entry["metric"].get("department", "unknown"),
                     str(float(reduced_value)),
+                    str(selected_ts),
+                    str(selected_value),
+                    str(series_values[-1] if series_values else None),
                 )
                 parsed_rows.append({
                     "metric": entry["metric"],
