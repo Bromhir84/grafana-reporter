@@ -6,6 +6,7 @@ from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV, GRAFANA_URL, GRAFANA_API_K
 from .grafana_utils import clone_dashboard_without_panels, delete_dashboard, paginate_to_a4, generate_pdf_from_pages
 from .prometheus_utils import (
     compute_range_from_env,
+    parse_grafana_time,
     extract_uid_from_url,
     resolve_grafana_vars,
     query_prometheus_instant,
@@ -197,7 +198,11 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
         # --- Compute range ---
         start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
-        logger.info(f"Querying Prometheus from {start_dt} to {end_dt}")
+        # Native Grafana boundaries (without end-of-period expansion) for macro resolution
+        # so $__range and $__interval match the dashboard exactly.
+        grafana_start = parse_grafana_time(TIME_FROM)
+        grafana_end = parse_grafana_time(TIME_TO_CSV)
+        logger.info(f"Querying Prometheus from {start_dt} to {end_dt} (Grafana native: {grafana_start} to {grafana_end})")
 
         # --- Loop panels ---
         for panel in table_panels:
@@ -232,8 +237,8 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                         except (TypeError, ValueError):
                             max_points = 1000
                         explicit_interval_seconds = compute_query_step_seconds(
-                            start_dt,
-                            end_dt,
+                            grafana_start,
+                            grafana_end,
                             max_points=max_points,
                             min_step=min_step_seconds or 60,
                         )
@@ -244,12 +249,12 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                 expr_resolved = resolve_grafana_vars(
                     expr,
                     GRAFANA_VARS,
-                    start_dt,
-                    end_dt,
+                    grafana_start,
+                    grafana_end,
                     interval_seconds=explicit_interval_seconds,
                 )
                 if explicit_interval_seconds is None:
-                    explicit_interval_seconds = compute_query_step_seconds(start_dt, end_dt)
+                    explicit_interval_seconds = compute_query_step_seconds(grafana_start, grafana_end)
 
                 uses_subquery = bool(re.search(r"\[[^\]]+:[^\]]+\]", expr_resolved))
                 use_range_mode = (instant_flag is False) if instant_flag is not None else uses_subquery
@@ -271,8 +276,8 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                                 expr,
                                 query_spec,
                                 GRAFANA_VARS,
-                                start_dt,
-                                end_dt,
+                                grafana_start,
+                                grafana_end,
                                 explicit_interval_seconds,
                             )
                             logger.info("Query mode: grafana-ds-query")
@@ -283,8 +288,8 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                         if grafana_rows is None:
                             results = query_prometheus_range(
                                 expr_resolved,
-                                start=start_dt,
-                                end=end_dt,
+                                start=grafana_start,
+                                end=grafana_end,
                                 step=explicit_interval_seconds,
                                 align_to_step=True,
                             )
