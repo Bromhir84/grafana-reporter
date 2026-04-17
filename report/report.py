@@ -6,6 +6,7 @@ from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV, GRAFANA_URL, GRAFANA_API_K
 from .grafana_utils import clone_dashboard_without_panels, delete_dashboard, paginate_to_a4, generate_pdf_from_pages
 from .prometheus_utils import (
     compute_range_from_env,
+    _seconds_to_prom_duration,
     extract_uid_from_url,
     resolve_grafana_vars,
     query_prometheus_instant,
@@ -25,7 +26,14 @@ logger = logging.getLogger(__name__)
 grafana_headers = {"Authorization": f"Bearer {GRAFANA_API_KEY}", "Content-Type": "application/json"}
 
 
-def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, start_dt: datetime, end_dt: datetime, interval_seconds: int):
+def _query_grafana_range_last(
+    expr: str,
+    query_spec: dict,
+    variables: dict,
+    start_dt: datetime,
+    end_dt: datetime,
+    interval_seconds: int | None,
+):
     """
     Query Grafana datasource backend directly and return last value per label set.
     This aligns execution with dashboard backend semantics better than raw Prometheus calls.
@@ -47,30 +55,61 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
 
     from_ms = int(start_dt.astimezone(timezone.utc).timestamp() * 1000)
     to_ms = int(end_dt.astimezone(timezone.utc).timestamp() * 1000)
+    range_seconds = max(1, int((end_dt - start_dt).total_seconds()))
     ref_id = (query_spec.get("ref_id") if isinstance(query_spec, dict) else None) or "A"
-    max_data_points = (query_spec.get("max_data_points") if isinstance(query_spec, dict) else None) or 1000
+    max_data_points = query_spec.get("max_data_points") if isinstance(query_spec, dict) else None
+    interval_ms_payload = int(max(1, interval_seconds) * 1000) if interval_seconds is not None else None
+    interval_text_payload = _seconds_to_prom_duration(interval_seconds) if interval_seconds is not None else None
+
+    scoped_vars = {
+        name: {"text": str(value), "value": value}
+        for name, value in variables.items()
+    }
+
+    scoped_vars.update({
+        "__range": {"text": _seconds_to_prom_duration(range_seconds), "value": _seconds_to_prom_duration(range_seconds)},
+        "__range_s": {"text": str(range_seconds), "value": range_seconds},
+        "__range_ms": {"text": str(range_seconds * 1000), "value": range_seconds * 1000},
+    })
+
+    if interval_ms_payload is not None and interval_text_payload is not None:
+        scoped_vars.update({
+            "__interval": {"text": interval_text_payload, "value": interval_text_payload},
+            "__interval_ms": {"text": str(interval_ms_payload), "value": interval_ms_payload},
+            "__rate_interval": {
+                "text": _seconds_to_prom_duration(max(60, interval_seconds * 4)),
+                "value": _seconds_to_prom_duration(max(60, interval_seconds * 4)),
+            },
+        })
+
+    query_payload = {
+        "refId": ref_id,
+        "expr": expr,
+        "datasource": datasource_obj,
+        "instant": False,
+        "range": True,
+        "scopedVars": scoped_vars,
+    }
+
+    if interval_ms_payload is not None:
+        query_payload["intervalMs"] = interval_ms_payload
+
+    interval_text = query_spec.get("interval") if isinstance(query_spec, dict) else None
+    if interval_text:
+        query_payload["interval"] = str(interval_text)
+
+    if max_data_points not in (None, ""):
+        try:
+            query_payload["maxDataPoints"] = int(max_data_points)
+        except (TypeError, ValueError):
+            pass
 
     payload = {
         "from": str(from_ms),
         "to": str(to_ms),
-        "queries": [
-            {
-                "refId": ref_id,
-                "expr": expr,
-                "datasource": datasource_obj,
-                "intervalMs": int(max(1, interval_seconds) * 1000),
-                "maxDataPoints": int(max_data_points),
-                "instant": False,
-                "range": True,
-                "scopedVars": {
-                    name: {"text": str(value), "value": value}
-                    for name, value in variables.items()
-                },
-            }
-        ],
+        "queries": [query_payload],
     }
 
-    query_payload = payload["queries"][0]
     target_format = query_spec.get("format") if isinstance(query_spec, dict) else None
     if target_format:
         query_payload["format"] = target_format
@@ -85,6 +124,15 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
     response.raise_for_status()
     data = response.json()
 
+    logger.info(
+        "Grafana ds/query refId=%s intervalMs=%s interval=%s maxDataPoints=%s format=%s",
+        ref_id,
+        str(query_payload.get("intervalMs")),
+        str(query_payload.get("interval")),
+        str(query_payload.get("maxDataPoints")),
+        str(query_payload.get("format")),
+    )
+
     result_entry = data.get("results", {}).get(ref_id)
     if not result_entry:
         results_map = data.get("results", {})
@@ -92,6 +140,10 @@ def _query_grafana_range_last(expr: str, query_spec: dict, variables: dict, star
             result_entry = next(iter(results_map.values()))
     if not result_entry:
         return []
+
+    executed_query = ((result_entry.get("meta") or {}).get("custom") or {}).get("executedQueryString")
+    if executed_query:
+        logger.info("Grafana executed query (%s): %s", ref_id, executed_query)
 
     frames = result_entry.get("frames", [])
     reducer = (query_spec.get("reducer") if isinstance(query_spec, dict) else None) or "lastNotNull"
@@ -249,6 +301,16 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                             min_step=min_step_seconds or 60,
                         )
 
+                payload_interval_seconds = None
+                if isinstance(query_spec, dict):
+                    if interval_ms not in (None, ""):
+                        try:
+                            payload_interval_seconds = max(1, int(interval_ms) // 1000)
+                        except (TypeError, ValueError):
+                            payload_interval_seconds = None
+                    if payload_interval_seconds is None:
+                        payload_interval_seconds = interval_from_text
+
                 if not expr:
                     continue
 
@@ -284,7 +346,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                                 GRAFANA_VARS,
                                 start_dt,
                                 end_dt,
-                                explicit_interval_seconds,
+                                payload_interval_seconds,
                             )
                             logger.info("Query mode: grafana-ds-query")
                         except Exception as grafana_error:
