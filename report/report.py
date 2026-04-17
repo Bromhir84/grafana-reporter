@@ -286,7 +286,9 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
         # --- Compute range ---
         start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
+        range_seconds = int((end_dt - start_dt).total_seconds())
         logger.info(f"Querying Prometheus from {start_dt} to {end_dt}")
+        logger.info(f"Computed range seconds = {range_seconds}")
 
         # --- Loop panels ---
         for panel in table_panels:

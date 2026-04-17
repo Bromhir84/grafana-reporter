@@ -11,21 +11,35 @@ CEST = ZoneInfo("Europe/Amsterdam")
 TIME_TO_ROUND_TO_PERIOD_END = os.getenv("TIME_TO_ROUND_TO_PERIOD_END", "true").lower() == "true"
 
 
+def _normalize_cest(dt: datetime) -> datetime:
+    """Rebuild datetime in Europe/Amsterdam so DST offset matches the local wall time."""
+    return datetime(
+        dt.year,
+        dt.month,
+        dt.day,
+        dt.hour,
+        dt.minute,
+        dt.second,
+        tzinfo=CEST,
+    )
+
+
 def _round_grafana_time(dt: datetime, unit: str) -> datetime:
     """Round down datetime to the start of the requested unit."""
     if unit == "M":
-        return dt.replace(day=1, hour=0, minute=0, second=0)
+        return _normalize_cest(dt.replace(day=1, hour=0, minute=0, second=0))
     if unit == "w":
-        return (dt - relativedelta(days=dt.weekday())).replace(hour=0, minute=0, second=0)
+        rounded = (dt - relativedelta(days=dt.weekday())).replace(hour=0, minute=0, second=0)
+        return _normalize_cest(rounded)
     if unit == "d":
-        return dt.replace(hour=0, minute=0, second=0)
+        return _normalize_cest(dt.replace(hour=0, minute=0, second=0))
     if unit == "h":
-        return dt.replace(minute=0, second=0)
+        return _normalize_cest(dt.replace(minute=0, second=0))
     if unit == "m":
-        return dt.replace(second=0)
+        return _normalize_cest(dt.replace(second=0))
     if unit == "s":
-        return dt
-    return dt
+        return _normalize_cest(dt)
+    return _normalize_cest(dt)
 
 
 def _rounding_unit_from_expr(time_str: str):
@@ -36,16 +50,16 @@ def _rounding_unit_from_expr(time_str: str):
 def _end_of_rounded_period(dt: datetime, rounding_unit: str) -> datetime:
     """Convert a rounded boundary timestamp to the end of that rounded period."""
     if rounding_unit == "M":
-        return dt + relativedelta(months=1, seconds=-1)
+        return _normalize_cest(dt + relativedelta(months=1, seconds=-1))
     if rounding_unit == "w":
-        return dt + relativedelta(weeks=1, seconds=-1)
+        return _normalize_cest(dt + relativedelta(weeks=1, seconds=-1))
     if rounding_unit == "d":
-        return dt + relativedelta(days=1, seconds=-1)
+        return _normalize_cest(dt + relativedelta(days=1, seconds=-1))
     if rounding_unit == "h":
-        return dt + relativedelta(hours=1, seconds=-1)
+        return _normalize_cest(dt + relativedelta(hours=1, seconds=-1))
     if rounding_unit == "m":
-        return dt + relativedelta(minutes=1, seconds=-1)
-    return dt
+        return _normalize_cest(dt + relativedelta(minutes=1, seconds=-1))
+    return _normalize_cest(dt)
 
 def parse_grafana_time(time_str: str) -> datetime:
     """
@@ -56,7 +70,7 @@ def parse_grafana_time(time_str: str) -> datetime:
       - now/M
     Always returns a datetime in Europe/Amsterdam timezone.
     """
-    now = datetime.now(CEST).replace(microsecond=0)
+    now = _normalize_cest(datetime.now(CEST).replace(microsecond=0))
 
     if time_str == "now":
         return now
@@ -85,7 +99,7 @@ def parse_grafana_time(time_str: str) -> datetime:
     if rounding_unit:
         dt = _round_grafana_time(dt, rounding_unit)
 
-    return dt
+    return _normalize_cest(dt)
 
 def compute_range_from_env(time_from: str, time_to: str):
     """Return start and end datetime based on TIME_FROM and TIME_TO (CEST-aware)."""
