@@ -115,12 +115,6 @@ def compute_range_from_env(time_from: str, time_to: str):
     return start, end
 
 
-def compute_prometheus_duration(start, end) -> str:
-    delta = end - start
-    hours = int(delta.total_seconds() / 3600)
-    return f"{hours}h"
-
-
 def _seconds_to_prom_duration(seconds: int) -> str:
     """Convert seconds to a compact Prometheus duration string."""
     seconds = max(1, int(seconds))

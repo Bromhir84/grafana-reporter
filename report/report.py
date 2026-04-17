@@ -367,7 +367,7 @@ def _query_grafana_range_last(
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
-    temp_uid, csv_files, pdf_path, dashboard_tz = None, [], None, None
+    temp_uid, csv_files, pdf_path = None, [], None
 
     try:
         # --- Clone dashboard and extract timezone ---
@@ -376,8 +376,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
             dashboard_uid, excluded_titles, return_json=True  # update utils for this
         )
 
-        dashboard_tz = dash_json.get("timezone", "UTC")
-        logger.info(f"Dashboard timezone = {dashboard_tz}")
+        logger.info(f"Dashboard timezone = {dash_json.get('timezone', 'UTC')}")
 
         # --- Compute range ---
         start_dt, end_dt = compute_range_from_env(TIME_FROM, TIME_TO_CSV)
