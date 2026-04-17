@@ -59,16 +59,28 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
 
         return None
 
+    def extract_panel_rename_map(panel):
+        for transformation in panel.get("transformations", []) or []:
+            if transformation.get("id") != "organize":
+                continue
+            options = transformation.get("options", {}) or {}
+            rename_by_name = options.get("renameByName", {}) or {}
+            if isinstance(rename_by_name, dict):
+                return {str(key): str(value) for key, value in rename_by_name.items()}
+        return {}
+
     def walk_panels(panels):
         for panel in panels:
             if panel.get("type") == "table":
                 panel_reducer = extract_panel_reducer(panel)
+                panel_rename_map = extract_panel_rename_map(panel)
                 query_specs = []
                 for target in panel.get("targets", []):
                     if "expr" not in target:
                         continue
                     if target.get("hide") is True:
                         continue
+                    ref_id = target.get("refId")
                     query_specs.append({
                         "expr": target["expr"],
                         "format": target.get("format"),
@@ -76,13 +88,14 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
                         "range": target.get("range"),
                         "legend_format": target.get("legendFormat"),
                         "editor_mode": target.get("editorMode"),
-                        "ref_id": target.get("refId"),
+                        "ref_id": ref_id,
                         "datasource": target.get("datasource") or panel.get("datasource"),
                         "interval": target.get("interval") or panel.get("interval"),
                         "interval_ms": target.get("intervalMs"),
                         "max_data_points": target.get("maxDataPoints") or panel.get("maxDataPoints"),
                         "min_step": target.get("minStep") or target.get("min_interval"),
                         "reducer": panel_reducer,
+                        "display_name": panel_rename_map.get(f"Value #{ref_id}") if ref_id else None,
                     })
                 table_panels.append({
                     "title": panel.get("title"),
@@ -90,6 +103,7 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
                     "queries": query_specs,
                     "time_from": panel.get("timeFrom"),
                     "time_shift": panel.get("timeShift"),
+                    "rename_map": panel_rename_map,
                     "transformations": [
                         t.get("id") for t in (panel.get("transformations") or []) if isinstance(t, dict)
                     ],

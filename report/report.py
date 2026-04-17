@@ -461,7 +461,11 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 uses_subquery = bool(re.search(r"\[[^\]]+:[^\]]+\]", expr_resolved))
                 use_range_mode = (instant_flag is False) if instant_flag is not None else uses_subquery
-                metric_name = extract_metric(expr_resolved)
+                metric_name = None
+                if isinstance(query_spec, dict):
+                    metric_name = query_spec.get("display_name")
+                if not metric_name:
+                    metric_name = extract_metric(expr_resolved)
                 mode = "range-last" if use_range_mode else "instant"
                 if use_range_mode:
                     reducer_name = query_spec.get("reducer") if isinstance(query_spec, dict) else None
@@ -549,6 +553,15 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
+                rename_map = panel.get("rename_map", {}) if isinstance(panel, dict) else {}
+                export_rename_map = {}
+                if isinstance(rename_map, dict):
+                    if rename_map.get("project"):
+                        export_rename_map["project"] = rename_map["project"]
+                    if rename_map.get("department"):
+                        export_rename_map["department"] = rename_map["department"]
+                if export_rename_map:
+                    panel_df = panel_df.rename(columns=export_rename_map)
                 safe_title = re.sub(r'[^A-Za-z0-9_\-]', '_', panel['title'])
                 csv_path = os.path.join("/tmp", f"{safe_title}.csv")
                 os.makedirs(os.path.dirname(csv_path), exist_ok=True) 
