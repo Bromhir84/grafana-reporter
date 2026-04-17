@@ -67,10 +67,15 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
                 for target in panel.get("targets", []):
                     if "expr" not in target:
                         continue
+                    if target.get("hide") is True:
+                        continue
                     query_specs.append({
                         "expr": target["expr"],
+                        "format": target.get("format"),
                         "instant": target.get("instant"),
                         "range": target.get("range"),
+                        "legend_format": target.get("legendFormat"),
+                        "editor_mode": target.get("editorMode"),
                         "ref_id": target.get("refId"),
                         "datasource": target.get("datasource") or panel.get("datasource"),
                         "interval": target.get("interval") or panel.get("interval"),
