@@ -122,6 +122,9 @@ def _query_grafana_range_last(
     elif interval_text_payload is not None:
         query_payload["interval"] = interval_text_payload
 
+    if max_data_points in (None, "") and interval_ms_payload is not None:
+        max_data_points = max(1, (range_ms + interval_ms_payload - 1) // interval_ms_payload)
+
     if max_data_points not in (None, ""):
         try:
             query_payload["maxDataPoints"] = int(max_data_points)
