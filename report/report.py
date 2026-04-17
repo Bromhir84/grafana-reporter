@@ -72,15 +72,19 @@ def _query_grafana_range_last(
         interval_ms_payload = int(effective_interval_seconds * 1000)
         interval_text_payload = _seconds_to_prom_duration(effective_interval_seconds)
 
+    aligned_range_seconds = range_seconds
+    if effective_interval_seconds and range_seconds >= effective_interval_seconds:
+        aligned_range_seconds = (range_seconds // effective_interval_seconds) * effective_interval_seconds
+
     scoped_vars = {
         name: {"text": str(value), "value": value}
         for name, value in variables.items()
     }
 
     scoped_vars.update({
-        "__range": {"text": _seconds_to_prom_duration(range_seconds), "value": _seconds_to_prom_duration(range_seconds)},
-        "__range_s": {"text": str(range_seconds), "value": range_seconds},
-        "__range_ms": {"text": str(range_seconds * 1000), "value": range_seconds * 1000},
+        "__range": {"text": _seconds_to_prom_duration(aligned_range_seconds), "value": _seconds_to_prom_duration(aligned_range_seconds)},
+        "__range_s": {"text": str(aligned_range_seconds), "value": aligned_range_seconds},
+        "__range_ms": {"text": str(aligned_range_seconds * 1000), "value": aligned_range_seconds * 1000},
     })
 
     if interval_ms_payload is not None and interval_text_payload is not None:
