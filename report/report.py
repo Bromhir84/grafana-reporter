@@ -147,6 +147,7 @@ def _query_grafana_range_last(
 
     frames = result_entry.get("frames", [])
     reducer = (query_spec.get("reducer") if isinstance(query_spec, dict) else None) or "lastNotNull"
+    logger.info("Grafana ds/query refId=%s returned %d frames", ref_id, len(frames))
 
     def reduce_values(values, reducer_name, timestamps=None):
         pairs = []
@@ -181,11 +182,18 @@ def _query_grafana_range_last(
         return numeric_values[-1]
 
     parsed_rows = []
-    for frame in frames:
+    for frame_idx, frame in enumerate(frames):
         schema_fields = frame.get("schema", {}).get("fields", [])
         values_matrix = frame.get("data", {}).get("values", [])
         if not schema_fields or not values_matrix:
             continue
+
+        if frame_idx < 3:
+            logger.info(
+                "Grafana frame[%d] fields=%s",
+                frame_idx,
+                [f"{field.get('name', '')}:{field.get('type', '')}" for field in schema_fields],
+            )
 
         field_names = [field.get("name", "") for field in schema_fields]
         numeric_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "number"]
@@ -241,7 +249,25 @@ def _query_grafana_range_last(
                     "value": float(reduced_value),
                 })
 
-    return parsed_rows
+    deduped_rows = {}
+    for row in parsed_rows:
+        labels = row.get("metric", {})
+        key = (
+            labels.get("project", "unknown"),
+            labels.get("department", "unknown"),
+        )
+        # Prefer the last parsed row for a label pair to avoid duplicate-key fanout in downstream merges.
+        deduped_rows[key] = row
+
+    if len(deduped_rows) != len(parsed_rows):
+        logger.info(
+            "Grafana ds/query refId=%s deduplicated rows from %d to %d",
+            ref_id,
+            len(parsed_rows),
+            len(deduped_rows),
+        )
+
+    return list(deduped_rows.values())
 
 
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
@@ -399,6 +425,8 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 if rows:
                     df = pd.DataFrame(rows)
+                    if not df.empty and {"project", "department"}.issubset(df.columns):
+                        df = df.groupby(["project", "department"], as_index=False).last()
 
                     # Merge with previous results if needed
                     if panel_df is None:
