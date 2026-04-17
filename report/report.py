@@ -55,7 +55,10 @@ def _query_grafana_range_last(
 
     from_ms = int(start_dt.astimezone(timezone.utc).timestamp() * 1000)
     to_ms = int(end_dt.astimezone(timezone.utc).timestamp() * 1000)
-    range_seconds = max(1, int((end_dt - start_dt).total_seconds()))
+    range_ms = max(1, to_ms - from_ms)
+    # Grafana effectively resolves $__range from the request millisecond bounds.
+    # Use rounded seconds to match inspector interpolation (for example 7772400s).
+    range_seconds = max(1, int(round(range_ms / 1000.0)))
     ref_id = (query_spec.get("ref_id") if isinstance(query_spec, dict) else None) or "A"
     max_data_points = query_spec.get("max_data_points") if isinstance(query_spec, dict) else None
     effective_interval_seconds = max(1, int(interval_seconds)) if interval_seconds is not None else None
@@ -72,19 +75,15 @@ def _query_grafana_range_last(
         interval_ms_payload = int(effective_interval_seconds * 1000)
         interval_text_payload = _seconds_to_prom_duration(effective_interval_seconds)
 
-    aligned_range_seconds = range_seconds
-    if effective_interval_seconds and range_seconds >= effective_interval_seconds:
-        aligned_range_seconds = (range_seconds // effective_interval_seconds) * effective_interval_seconds
-
     scoped_vars = {
         name: {"text": str(value), "value": value}
         for name, value in variables.items()
     }
 
     scoped_vars.update({
-        "__range": {"text": _seconds_to_prom_duration(aligned_range_seconds), "value": _seconds_to_prom_duration(aligned_range_seconds)},
-        "__range_s": {"text": str(aligned_range_seconds), "value": aligned_range_seconds},
-        "__range_ms": {"text": str(aligned_range_seconds * 1000), "value": aligned_range_seconds * 1000},
+        "__range": {"text": _seconds_to_prom_duration(range_seconds), "value": _seconds_to_prom_duration(range_seconds)},
+        "__range_s": {"text": str(range_seconds), "value": range_seconds},
+        "__range_ms": {"text": str(range_ms), "value": range_ms},
     })
 
     if interval_ms_payload is not None and interval_text_payload is not None:
@@ -153,6 +152,13 @@ def _query_grafana_range_last(
         str(query_payload.get("maxDataPoints")),
         str(query_payload.get("format")),
     )
+    logger.info(
+        "Grafana ds/query refId=%s scoped $__range=%s $__range_s=%s $__range_ms=%s",
+        ref_id,
+        str(scoped_vars.get("__range", {}).get("value")),
+        str(scoped_vars.get("__range_s", {}).get("value")),
+        str(scoped_vars.get("__range_ms", {}).get("value")),
+    )
 
     result_entry = data.get("results", {}).get(ref_id)
     if not result_entry:
@@ -192,7 +198,11 @@ def _query_grafana_range_last(
         if name in ("first", "firstNotNull"):
             return numeric_values[0]
         if name in ("last", "lastNotNull"):
-            return numeric_values[-1]
+            # Preserve source order and choose the terminal non-null sample.
+            for original in reversed(values):
+                if original is not None:
+                    return float(original)
+            return None
         # Default and common table reducer.
         return numeric_values[-1]
 
