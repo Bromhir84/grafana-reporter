@@ -203,14 +203,17 @@ def resolve_grafana_vars(query: str, variables: dict, start: datetime, end: date
     range_seconds = max(1, int((end - start).total_seconds()))
     if interval_seconds is None:
         interval_seconds = compute_query_step_seconds(start, end)
+    aligned_range_seconds = range_seconds
+    if interval_seconds and interval_seconds > 0 and range_seconds >= interval_seconds:
+        aligned_range_seconds = (range_seconds // interval_seconds) * interval_seconds
 
     macro_values = {
-        "$__range": _seconds_to_prom_duration(range_seconds),
-        "${__range}": _seconds_to_prom_duration(range_seconds),
-        "$__range_s": str(range_seconds),
-        "${__range_s}": str(range_seconds),
-        "$__range_ms": str(range_seconds * 1000),
-        "${__range_ms}": str(range_seconds * 1000),
+        "$__range": _seconds_to_prom_duration(aligned_range_seconds),
+        "${__range}": _seconds_to_prom_duration(aligned_range_seconds),
+        "$__range_s": str(aligned_range_seconds),
+        "${__range_s}": str(aligned_range_seconds),
+        "$__range_ms": str(aligned_range_seconds * 1000),
+        "${__range_ms}": str(aligned_range_seconds * 1000),
         "$__interval": _seconds_to_prom_duration(interval_seconds),
         "${__interval}": _seconds_to_prom_duration(interval_seconds),
         "$__interval_ms": str(interval_seconds * 1000),

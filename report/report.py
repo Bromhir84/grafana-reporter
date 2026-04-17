@@ -60,6 +60,11 @@ def _query_grafana_range_last(
     max_data_points = query_spec.get("max_data_points") if isinstance(query_spec, dict) else None
     interval_ms_payload = int(max(1, interval_seconds) * 1000) if interval_seconds is not None else None
     interval_text_payload = _seconds_to_prom_duration(interval_seconds) if interval_seconds is not None else None
+    utc_offset_seconds = int((end_dt.utcoffset() or timezone.utc.utcoffset(end_dt) or timezone.utc.utcoffset(datetime.now())).total_seconds())
+
+    if interval_ms_payload is None:
+        interval_ms_payload = int(compute_query_step_seconds(start_dt, end_dt, max_points=max(1, int(range_seconds // 3600))) * 1000)
+        interval_text_payload = _seconds_to_prom_duration(interval_ms_payload // 1000)
 
     scoped_vars = {
         name: {"text": str(value), "value": value}
@@ -86,8 +91,12 @@ def _query_grafana_range_last(
         "refId": ref_id,
         "expr": expr,
         "datasource": datasource_obj,
+        "exemplar": False,
         "instant": False,
         "range": True,
+        "utcOffsetSec": utc_offset_seconds,
+        "scopes": [],
+        "adhocFilters": [],
         "scopedVars": scoped_vars,
     }
 
@@ -141,10 +150,6 @@ def _query_grafana_range_last(
     if not result_entry:
         return []
 
-    executed_query = ((result_entry.get("meta") or {}).get("custom") or {}).get("executedQueryString")
-    if executed_query:
-        logger.info("Grafana executed query (%s): %s", ref_id, executed_query)
-
     frames = result_entry.get("frames", [])
     reducer = (query_spec.get("reducer") if isinstance(query_spec, dict) else None) or "lastNotNull"
     logger.info("Grafana ds/query refId=%s returned %d frames", ref_id, len(frames))
@@ -186,6 +191,10 @@ def _query_grafana_range_last(
         if not schema_fields or not values_matrix:
             continue
 
+        frame_executed_query = (((frame.get("schema") or {}).get("meta") or {}).get("custom") or {}).get("executedQueryString")
+        if frame_executed_query and frame_idx < 3:
+            logger.info("Grafana executed query (%s frame[%d]): %s", ref_id, frame_idx, frame_executed_query)
+
         if frame_idx < 3:
             logger.info(
                 "Grafana frame[%d] fields=%s",
@@ -210,6 +219,13 @@ def _query_grafana_range_last(
                 reduced_value = reduce_values(col_values, reducer, time_values)
                 if reduced_value is None:
                     continue
+                logger.info(
+                    "Grafana parsed value refId=%s project=%s department=%s value=%s",
+                    ref_id,
+                    field_labels.get("project", "unknown"),
+                    field_labels.get("department", "unknown"),
+                    str(float(reduced_value)),
+                )
                 parsed_rows.append({
                     "metric": field_labels,
                     "value": float(reduced_value),
@@ -242,6 +258,13 @@ def _query_grafana_range_last(
                 reduced_value = reduce_values(series_values, reducer, series_timestamps)
                 if reduced_value is None:
                     continue
+                logger.info(
+                    "Grafana parsed value refId=%s project=%s department=%s value=%s",
+                    ref_id,
+                    entry["metric"].get("project", "unknown"),
+                    entry["metric"].get("department", "unknown"),
+                    str(float(reduced_value)),
+                )
                 parsed_rows.append({
                     "metric": entry["metric"],
                     "value": float(reduced_value),
