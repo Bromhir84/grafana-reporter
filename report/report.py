@@ -291,6 +291,18 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         # --- Loop panels ---
         for panel in table_panels:
             logger.info(f"Rebuilding table panel: {panel['title']}")
+            logger.info(
+                "Panel id=%s timeFrom=%s timeShift=%s transformations=%s",
+                str(panel.get("id")),
+                str(panel.get("time_from")),
+                str(panel.get("time_shift")),
+                str(panel.get("transformations")),
+            )
+            if panel.get("time_from") or panel.get("time_shift"):
+                logger.warning(
+                    "Panel '%s' uses time override/time shift that is not yet applied in report query time range.",
+                    panel["title"],
+                )
             panel_df = None
 
             for query_spec in panel["queries"]:

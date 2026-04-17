@@ -84,7 +84,16 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
                         "min_step": target.get("minStep") or target.get("min_interval"),
                         "reducer": panel_reducer,
                     })
-                table_panels.append({"title": panel.get("title"), "queries": query_specs})
+                table_panels.append({
+                    "title": panel.get("title"),
+                    "id": panel.get("id"),
+                    "queries": query_specs,
+                    "time_from": panel.get("timeFrom"),
+                    "time_shift": panel.get("timeShift"),
+                    "transformations": [
+                        t.get("id") for t in (panel.get("transformations") or []) if isinstance(t, dict)
+                    ],
+                })
             if "panels" in panel:
                 walk_panels(panel["panels"])
     walk_panels(dash.get("panels", []))
