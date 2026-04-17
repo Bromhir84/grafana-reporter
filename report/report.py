@@ -200,9 +200,37 @@ def _query_grafana_range_last(
         if name == "max":
             return max(numeric_values)
         if name in ("first", "firstNotNull"):
+            if timestamps is not None:
+                first_ts = None
+                first_value = None
+                for i, original in enumerate(values):
+                    if original is None:
+                        continue
+                    ts = timestamps[i] if i < len(timestamps) else None
+                    if ts is None:
+                        continue
+                    if first_ts is None or ts < first_ts:
+                        first_ts = ts
+                        first_value = float(original)
+                if first_value is not None:
+                    return first_value
             return numeric_values[0]
         if name in ("last", "lastNotNull"):
-            # Preserve source order and choose the terminal non-null sample.
+            if timestamps is not None:
+                last_ts = None
+                last_value = None
+                for i, original in enumerate(values):
+                    if original is None:
+                        continue
+                    ts = timestamps[i] if i < len(timestamps) else None
+                    if ts is None:
+                        continue
+                    if last_ts is None or ts >= last_ts:
+                        last_ts = ts
+                        last_value = float(original)
+                if last_value is not None:
+                    return last_value
+            # Fallback when no timestamps are available.
             for original in reversed(values):
                 if original is not None:
                     return float(original)
