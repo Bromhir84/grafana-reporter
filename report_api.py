@@ -190,8 +190,13 @@ def compute_query_step_seconds(start: datetime, end: datetime, max_points: int =
         3600, 7200, 10800, 21600, 43200,
         86400, 604800, 2592000,
     ]
-    for bucket in interval_buckets:
+    for index, bucket in enumerate(interval_buckets):
         if raw_step <= bucket:
+            if index == 0:
+                return bucket
+            previous_bucket = interval_buckets[index - 1]
+            if abs(raw_step - previous_bucket) <= abs(bucket - raw_step):
+                return previous_bucket
             return bucket
 
     return raw_step
