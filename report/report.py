@@ -173,12 +173,10 @@ def _query_grafana_range_last(
         if name == "max":
             return max(numeric_values)
         if name in ("first", "firstNotNull"):
-            if any(ts is not None for ts, _ in pairs):
-                return min(pairs, key=lambda p: (p[0] is None, p[0]))[1]
             return numeric_values[0]
+        if name in ("last", "lastNotNull"):
+            return numeric_values[-1]
         # Default and common table reducer.
-        if any(ts is not None for ts, _ in pairs):
-            return max(pairs, key=lambda p: (p[0] is None, p[0]))[1]
         return numeric_values[-1]
 
     parsed_rows = []
