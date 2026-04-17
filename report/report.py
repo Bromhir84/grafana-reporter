@@ -58,13 +58,19 @@ def _query_grafana_range_last(
     range_seconds = max(1, int((end_dt - start_dt).total_seconds()))
     ref_id = (query_spec.get("ref_id") if isinstance(query_spec, dict) else None) or "A"
     max_data_points = query_spec.get("max_data_points") if isinstance(query_spec, dict) else None
-    interval_ms_payload = int(max(1, interval_seconds) * 1000) if interval_seconds is not None else None
-    interval_text_payload = _seconds_to_prom_duration(interval_seconds) if interval_seconds is not None else None
+    effective_interval_seconds = max(1, int(interval_seconds)) if interval_seconds is not None else None
+    interval_ms_payload = effective_interval_seconds * 1000 if effective_interval_seconds is not None else None
+    interval_text_payload = _seconds_to_prom_duration(effective_interval_seconds) if effective_interval_seconds is not None else None
     utc_offset_seconds = int((end_dt.utcoffset() or timezone.utc.utcoffset(end_dt) or timezone.utc.utcoffset(datetime.now())).total_seconds())
 
     if interval_ms_payload is None:
-        interval_ms_payload = int(compute_query_step_seconds(start_dt, end_dt, max_points=max(1, int(range_seconds // 3600))) * 1000)
-        interval_text_payload = _seconds_to_prom_duration(interval_ms_payload // 1000)
+        effective_interval_seconds = compute_query_step_seconds(
+            start_dt,
+            end_dt,
+            max_points=max(1, int(range_seconds // 3600)),
+        )
+        interval_ms_payload = int(effective_interval_seconds * 1000)
+        interval_text_payload = _seconds_to_prom_duration(effective_interval_seconds)
 
     scoped_vars = {
         name: {"text": str(value), "value": value}
@@ -82,8 +88,8 @@ def _query_grafana_range_last(
             "__interval": {"text": interval_text_payload, "value": interval_text_payload},
             "__interval_ms": {"text": str(interval_ms_payload), "value": interval_ms_payload},
             "__rate_interval": {
-                "text": _seconds_to_prom_duration(max(60, interval_seconds * 4)),
-                "value": _seconds_to_prom_duration(max(60, interval_seconds * 4)),
+                "text": _seconds_to_prom_duration(max(60, effective_interval_seconds * 4)),
+                "value": _seconds_to_prom_duration(max(60, effective_interval_seconds * 4)),
             },
         })
 
@@ -106,6 +112,8 @@ def _query_grafana_range_last(
     interval_text = query_spec.get("interval") if isinstance(query_spec, dict) else None
     if interval_text:
         query_payload["interval"] = str(interval_text)
+    elif interval_text_payload is not None:
+        query_payload["interval"] = interval_text_payload
 
     if max_data_points not in (None, ""):
         try:
