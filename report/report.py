@@ -55,6 +55,10 @@ def _query_grafana_range_last(
 
     from_ms = int(start_dt.astimezone(timezone.utc).timestamp() * 1000)
     to_ms = int(end_dt.astimezone(timezone.utc).timestamp() * 1000)
+    # Grafana range requests are effectively end-inclusive for second-precision bounds.
+    # When the parsed end timestamp has no millisecond component, include the full last second.
+    if to_ms % 1000 == 0:
+        to_ms += 999
     range_ms = max(1, to_ms - from_ms)
     # Grafana effectively resolves $__range from the request millisecond bounds.
     # Use rounded seconds to match inspector interpolation (for example 7772400s).
