@@ -74,6 +74,11 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
             if panel.get("type") == "table":
                 panel_reducer = extract_panel_reducer(panel)
                 panel_rename_map = extract_panel_rename_map(panel)
+                panel_transformations = [
+                    transformation
+                    for transformation in (panel.get("transformations") or [])
+                    if isinstance(transformation, dict)
+                ]
                 query_specs = []
                 for target in panel.get("targets", []):
                     if "expr" not in target:
@@ -104,8 +109,9 @@ def clone_dashboard_without_panels(dashboard_uid: str, excluded_titles=None, ret
                     "time_from": panel.get("timeFrom"),
                     "time_shift": panel.get("timeShift"),
                     "rename_map": panel_rename_map,
+                    "transformation_specs": panel_transformations,
                     "transformations": [
-                        t.get("id") for t in (panel.get("transformations") or []) if isinstance(t, dict)
+                        t.get("id") for t in panel_transformations
                     ],
                 })
             if "panels" in panel:

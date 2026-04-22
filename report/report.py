@@ -380,6 +380,69 @@ def _query_grafana_range_last(
     return list(deduped_rows.values())
 
 
+def _last_not_null(series: pd.Series):
+    non_null = series.dropna()
+    if non_null.empty:
+        return None
+    return non_null.iloc[-1]
+
+
+def _apply_group_by_transformation(panel_df: pd.DataFrame, transformation: dict) -> pd.DataFrame:
+    options = transformation.get("options", {}) or {}
+    fields = options.get("fields", {}) or {}
+    if not isinstance(fields, dict) or not fields:
+        return panel_df
+
+    group_columns = []
+    aggregation_map = {}
+
+    for column_name, field_options in fields.items():
+        if column_name not in panel_df.columns or not isinstance(field_options, dict):
+            continue
+
+        operation = str(field_options.get("operation") or "").lower()
+        aggregations = field_options.get("aggregations") or []
+
+        if operation in ("groupby", "group_by"):
+            group_columns.append(column_name)
+            continue
+
+        if operation not in ("aggregate", "reduce") or not aggregations:
+            continue
+
+        reducer_name = str(aggregations[0])
+        reducer_key = reducer_name.lower()
+        if reducer_key in ("sum", "total"):
+            aggregation_map[column_name] = "sum"
+        elif reducer_key in ("mean", "avg", "average"):
+            aggregation_map[column_name] = "mean"
+        elif reducer_key == "min":
+            aggregation_map[column_name] = "min"
+        elif reducer_key == "max":
+            aggregation_map[column_name] = "max"
+        elif reducer_key in ("count", "countnotnull"):
+            aggregation_map[column_name] = "count"
+        elif reducer_key in ("last", "lastnotnull"):
+            aggregation_map[column_name] = _last_not_null
+        elif reducer_key in ("first", "firstnotnull"):
+            aggregation_map[column_name] = lambda series: series.dropna().iloc[0] if not series.dropna().empty else None
+
+    if not group_columns or not aggregation_map:
+        return panel_df
+
+    return panel_df.groupby(group_columns, as_index=False).agg(aggregation_map)
+
+
+def _apply_panel_transformations(panel_df: pd.DataFrame, transformations: list[dict] | None) -> pd.DataFrame:
+    transformed_df = panel_df
+    for transformation in transformations or []:
+        if not isinstance(transformation, dict):
+            continue
+        if transformation.get("id") == "groupBy":
+            transformed_df = _apply_group_by_transformation(transformed_df, transformation)
+    return transformed_df
+
+
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
     temp_uid, csv_files, pdf_path = None, [], None
@@ -569,6 +632,10 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
+                panel_df = _apply_panel_transformations(
+                    panel_df,
+                    panel.get("transformation_specs") if isinstance(panel, dict) else None,
+                )
                 rename_map = panel.get("rename_map", {}) if isinstance(panel, dict) else {}
                 export_rename_map = {}
                 if isinstance(rename_map, dict):
