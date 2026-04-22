@@ -380,6 +380,183 @@ def _query_grafana_range_last(
     return list(deduped_rows.values())
 
 
+def _query_grafana_instant(
+    expr: str,
+    query_spec: dict,
+    variables: dict,
+    start_dt: datetime,
+    end_dt: datetime,
+    interval_seconds: int | None,
+):
+    """Query Grafana datasource backend for an instant evaluation and parse rows by project/department."""
+    datasource = query_spec.get("datasource") if isinstance(query_spec, dict) else None
+    if not datasource:
+        return None
+
+    if isinstance(datasource, str):
+        if datasource.startswith("$"):
+            return None
+        datasource_obj = {"uid": datasource}
+    elif isinstance(datasource, dict):
+        datasource_obj = {k: v for k, v in datasource.items() if k in ("uid", "type") and v}
+        if not datasource_obj:
+            return None
+    else:
+        return None
+
+    from_ms = int(start_dt.astimezone(timezone.utc).timestamp() * 1000)
+    to_ms = int(end_dt.astimezone(timezone.utc).timestamp() * 1000)
+    if to_ms % 1000 == 0:
+        to_ms += 999
+    range_ms = max(1, to_ms - from_ms)
+    range_seconds = max(1, int(round(range_ms / 1000.0)))
+    ref_id = (query_spec.get("ref_id") if isinstance(query_spec, dict) else None) or "A"
+    max_data_points = query_spec.get("max_data_points") if isinstance(query_spec, dict) else None
+    effective_interval_seconds = max(1, int(interval_seconds)) if interval_seconds is not None else None
+    interval_ms_payload = effective_interval_seconds * 1000 if effective_interval_seconds is not None else None
+    interval_text_payload = _seconds_to_prom_duration(effective_interval_seconds) if effective_interval_seconds is not None else None
+    utc_offset_seconds = int((end_dt.utcoffset() or timezone.utc.utcoffset(end_dt) or timezone.utc.utcoffset(datetime.now())).total_seconds())
+
+    if interval_ms_payload is None:
+        effective_interval_seconds = compute_query_step_seconds(
+            start_dt,
+            end_dt,
+            max_points=max(1, int(range_seconds // 3600)),
+        )
+        interval_ms_payload = int(effective_interval_seconds * 1000)
+        interval_text_payload = _seconds_to_prom_duration(effective_interval_seconds)
+
+    scoped_vars = {
+        name: {"text": str(value), "value": value}
+        for name, value in variables.items()
+    }
+    scoped_vars.update({
+        "__range": {"text": _seconds_to_prom_duration(range_seconds), "value": _seconds_to_prom_duration(range_seconds)},
+        "__range_s": {"text": str(range_seconds), "value": range_seconds},
+        "__range_ms": {"text": str(range_ms), "value": range_ms},
+        "__interval": {"text": interval_text_payload, "value": interval_text_payload},
+        "__interval_ms": {"text": str(interval_ms_payload), "value": interval_ms_payload},
+        "__rate_interval": {
+            "text": _seconds_to_prom_duration(max(60, effective_interval_seconds * 4)),
+            "value": _seconds_to_prom_duration(max(60, effective_interval_seconds * 4)),
+        },
+    })
+
+    query_payload = {
+        "refId": ref_id,
+        "expr": expr,
+        "datasource": datasource_obj,
+        "exemplar": False,
+        "instant": True,
+        "range": False,
+        "utcOffsetSec": utc_offset_seconds,
+        "scopes": [],
+        "adhocFilters": [],
+        "scopedVars": scoped_vars,
+        "intervalMs": interval_ms_payload,
+        "interval": interval_text_payload,
+    }
+
+    if max_data_points not in (None, ""):
+        try:
+            query_payload["maxDataPoints"] = int(max_data_points)
+        except (TypeError, ValueError):
+            pass
+
+    target_format = query_spec.get("format") if isinstance(query_spec, dict) else None
+    if target_format:
+        query_payload["format"] = target_format
+    legend_format = query_spec.get("legend_format") if isinstance(query_spec, dict) else None
+    if legend_format:
+        query_payload["legendFormat"] = legend_format
+    editor_mode = query_spec.get("editor_mode") if isinstance(query_spec, dict) else None
+    if editor_mode:
+        query_payload["editorMode"] = editor_mode
+
+    payload = {
+        "from": str(from_ms),
+        "to": str(to_ms),
+        "queries": [query_payload],
+    }
+
+    response = requests.post(f"{GRAFANA_URL}/api/ds/query", headers=grafana_headers, json=payload, timeout=60)
+    response.raise_for_status()
+    data = response.json()
+
+    result_entry = data.get("results", {}).get(ref_id)
+    if not result_entry:
+        results_map = data.get("results", {})
+        if results_map:
+            result_entry = next(iter(results_map.values()))
+    if not result_entry:
+        return []
+
+    frames = result_entry.get("frames", [])
+    parsed_rows = []
+    for frame in frames:
+        schema_fields = frame.get("schema", {}).get("fields", [])
+        values_matrix = frame.get("data", {}).get("values", [])
+        if not schema_fields or not values_matrix:
+            continue
+
+        field_names = [field.get("name", "") for field in schema_fields]
+        numeric_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "number"]
+        string_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "string"]
+        row_count = max((len(col) for col in values_matrix), default=0)
+
+        for idx in numeric_indexes:
+            field = schema_fields[idx]
+            col_values = values_matrix[idx] if idx < len(values_matrix) else []
+            field_labels = field.get("labels", {}) or {}
+
+            if field_labels.get("project") or field_labels.get("department"):
+                value = None
+                for original in reversed(col_values):
+                    if original is not None:
+                        value = float(original)
+                        break
+                if value is None:
+                    continue
+                parsed_rows.append({
+                    "metric": field_labels,
+                    "value": value,
+                })
+                continue
+
+            series_by_key = {}
+            for row_idx in range(row_count):
+                value = col_values[row_idx] if row_idx < len(col_values) else None
+                if value is None:
+                    continue
+
+                labels = dict(field_labels)
+                for sidx in string_indexes:
+                    label_name = field_names[sidx]
+                    label_value_col = values_matrix[sidx] if sidx < len(values_matrix) else []
+                    label_value = label_value_col[row_idx] if row_idx < len(label_value_col) else None
+                    if label_name in ("project", "department") and label_value is not None:
+                        labels[label_name] = str(label_value)
+
+                key = (labels.get("project", "unknown"), labels.get("department", "unknown"))
+                series_by_key[key] = {
+                    "metric": labels,
+                    "value": float(value),
+                }
+
+            parsed_rows.extend(series_by_key.values())
+
+    deduped_rows = {}
+    for row in parsed_rows:
+        labels = row.get("metric", {})
+        key = (
+            labels.get("project", "unknown"),
+            labels.get("department", "unknown"),
+        )
+        deduped_rows[key] = row
+
+    return list(deduped_rows.values())
+
+
 def _last_not_null(series: pd.Series):
     non_null = series.dropna()
     if non_null.empty:
@@ -579,16 +756,26 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 try:
                     grafana_rows = None
-                    if use_range_mode and isinstance(query_spec, dict):
+                    if isinstance(query_spec, dict):
                         try:
-                            grafana_rows = _query_grafana_range_last(
-                                expr,
-                                query_spec,
-                                GRAFANA_VARS,
-                                start_dt,
-                                end_dt,
-                                payload_interval_seconds,
-                            )
+                            if use_range_mode:
+                                grafana_rows = _query_grafana_range_last(
+                                    expr,
+                                    query_spec,
+                                    GRAFANA_VARS,
+                                    start_dt,
+                                    end_dt,
+                                    payload_interval_seconds,
+                                )
+                            else:
+                                grafana_rows = _query_grafana_instant(
+                                    expr,
+                                    query_spec,
+                                    GRAFANA_VARS,
+                                    start_dt,
+                                    end_dt,
+                                    payload_interval_seconds,
+                                )
                             logger.info("Query backend: %s", _describe_query_datasource(query_spec))
                         except Exception as grafana_error:
                             logger.warning(f"Grafana datasource query fallback to Prometheus: {grafana_error}")
@@ -613,7 +800,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                     continue
 
                 rows = []
-                if use_range_mode and grafana_rows is not None:
+                if grafana_rows is not None:
                     for row in grafana_rows:
                         metric_labels = row.get("metric", {})
                         rows.append({
