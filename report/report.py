@@ -492,6 +492,18 @@ def _query_grafana_instant(
         return []
 
     frames = result_entry.get("frames", [])
+
+    def _is_numeric_like_column(values):
+        sample = [value for value in values if value is not None][:10]
+        if not sample:
+            return False
+        try:
+            for value in sample:
+                float(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+
     parsed_rows = []
     for frame in frames:
         schema_fields = frame.get("schema", {}).get("fields", [])
@@ -500,7 +512,14 @@ def _query_grafana_instant(
             continue
 
         field_names = [field.get("name", "") for field in schema_fields]
-        numeric_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "number"]
+        numeric_indexes = []
+        for idx, field in enumerate(schema_fields):
+            field_type = field.get("type")
+            column_values = values_matrix[idx] if idx < len(values_matrix) else []
+            if field_type == "number":
+                numeric_indexes.append(idx)
+            elif field_type not in ("time", "string") and _is_numeric_like_column(column_values):
+                numeric_indexes.append(idx)
         string_indexes = [idx for idx, field in enumerate(schema_fields) if field.get("type") == "string"]
         row_count = max((len(col) for col in values_matrix), default=0)
 
@@ -544,6 +563,16 @@ def _query_grafana_instant(
                 }
 
             parsed_rows.extend(series_by_key.values())
+
+    if not parsed_rows:
+        logger.info(
+            "Grafana instant parser returned no rows refId=%s frameFields=%s",
+            ref_id,
+            [
+                [f"{field.get('name', '')}:{field.get('type', '')}" for field in (frame.get('schema', {}).get('fields', []) or [])]
+                for frame in frames[:3]
+            ],
+        )
 
     deduped_rows = {}
     for row in parsed_rows:
