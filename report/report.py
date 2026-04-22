@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 import os
 import requests
-from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV, GRAFANA_URL, GRAFANA_API_KEY
+from ..config import TIME_FROM, TIME_TO, TIME_TO_CSV, GRAFANA_URL, GRAFANA_API_KEY, PROMETHEUS_URL
 from .grafana_utils import clone_dashboard_without_panels, delete_dashboard, paginate_to_a4, generate_pdf_from_pages
 from .prometheus_utils import (
     compute_range_from_env,
@@ -24,6 +24,21 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 grafana_headers = {"Authorization": f"Bearer {GRAFANA_API_KEY}", "Content-Type": "application/json"}
+
+
+def _describe_query_datasource(query_spec: dict | None) -> str:
+    datasource = query_spec.get("datasource") if isinstance(query_spec, dict) else None
+    if isinstance(datasource, str):
+        return f"grafana-datasource uid={datasource}"
+    if isinstance(datasource, dict):
+        parts = []
+        if datasource.get("uid"):
+            parts.append(f"uid={datasource['uid']}")
+        if datasource.get("type"):
+            parts.append(f"type={datasource['type']}")
+        if parts:
+            return "grafana-datasource " + " ".join(parts)
+    return "grafana-datasource unresolved"
 
 
 def _query_grafana_range_last(
@@ -486,12 +501,13 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                                 end_dt,
                                 payload_interval_seconds,
                             )
-                            logger.info("Query mode: grafana-ds-query")
+                            logger.info("Query backend: %s", _describe_query_datasource(query_spec))
                         except Exception as grafana_error:
                             logger.warning(f"Grafana datasource query fallback to Prometheus: {grafana_error}")
 
                     if use_range_mode:
                         if grafana_rows is None:
+                            logger.info("Query backend: direct-prometheus url=%s", PROMETHEUS_URL)
                             results = query_prometheus_range(
                                 expr_resolved,
                                 start=start_dt,
@@ -502,6 +518,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                         else:
                             results = None
                     else:
+                        logger.info("Query backend: direct-prometheus url=%s", PROMETHEUS_URL)
                         results = query_prometheus_instant(expr_resolved, eval_time=end_dt)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")

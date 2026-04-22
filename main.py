@@ -1,7 +1,7 @@
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from .config import EXCLUDED_TITLES
+from .config import EXCLUDED_TITLES, PROMETHEUS_URL
 from .report.report import process_report
 
 import os
@@ -13,7 +13,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(root_path=os.getenv("ROOT_PATH", "/report"))
+logger.info("Configured direct Prometheus URL: %s", PROMETHEUS_URL)
 
 # Allow Grafana front-end to call this API
 app.add_middleware(
