@@ -443,6 +443,29 @@ def _apply_panel_transformations(panel_df: pd.DataFrame, transformations: list[d
     return transformed_df
 
 
+def _extract_panel_join_fields(panel: dict | None) -> list[str]:
+    default_keys = ["project", "department"]
+    if not isinstance(panel, dict):
+        return default_keys
+
+    for transformation in panel.get("transformation_specs") or []:
+        if not isinstance(transformation, dict):
+            continue
+        if transformation.get("id") != "joinByField":
+            continue
+
+        options = transformation.get("options", {}) or {}
+        by_field = options.get("byField")
+        if isinstance(by_field, str) and by_field.strip():
+            return [by_field.strip()]
+        if isinstance(by_field, list):
+            keys = [str(value).strip() for value in by_field if str(value).strip()]
+            if keys:
+                return keys
+
+    return default_keys
+
+
 def process_report(dashboard_url: str, email_to: str = None, excluded_titles=None):
     excluded_titles = excluded_titles or []
     temp_uid, csv_files, pdf_path = None, [], None
@@ -465,12 +488,14 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
         # --- Loop panels ---
         for panel in table_panels:
             logger.info(f"Rebuilding table panel: {panel['title']}")
+            merge_keys = _extract_panel_join_fields(panel)
             logger.info(
-                "Panel id=%s timeFrom=%s timeShift=%s transformations=%s",
+                "Panel id=%s timeFrom=%s timeShift=%s transformations=%s mergeKeys=%s",
                 str(panel.get("id")),
                 str(panel.get("time_from")),
                 str(panel.get("time_shift")),
                 str(panel.get("transformations")),
+                str(merge_keys),
             )
             if panel.get("time_from") or panel.get("time_shift"):
                 logger.warning(
@@ -617,18 +642,33 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 if rows:
                     df = pd.DataFrame(rows)
-                    if not df.empty and {"project", "department"}.issubset(df.columns):
-                        df = df.groupby(["project", "department"], as_index=False).last()
+                    available_merge_keys = [key for key in merge_keys if key in df.columns]
+                    if not df.empty and available_merge_keys:
+                        df = df.groupby(available_merge_keys, as_index=False).last()
 
                     # Merge with previous results if needed
                     if panel_df is None:
                         panel_df = df
                     else:
-                        panel_df = pd.merge(
-                            panel_df, df,
-                            on=["project", "department"],  # 👈 join on both
-                            how="outer"
-                        )
+                        available_merge_keys = [key for key in merge_keys if key in panel_df.columns and key in df.columns]
+                        overlapping_non_key_columns = [
+                            column
+                            for column in df.columns
+                            if column in panel_df.columns and column not in available_merge_keys
+                        ]
+                        if overlapping_non_key_columns:
+                            df = df.drop(columns=overlapping_non_key_columns)
+                        if available_merge_keys:
+                            panel_df = pd.merge(
+                                panel_df, df,
+                                on=available_merge_keys,
+                                how="outer"
+                            )
+                        else:
+                            panel_df = pd.concat(
+                                [panel_df.reset_index(drop=True), df.reset_index(drop=True)],
+                                axis=1,
+                            )
 
             if panel_df is not None and not panel_df.empty:
                 panel_df = panel_df.fillna(0)
