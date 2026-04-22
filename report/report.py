@@ -756,6 +756,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
 
                 try:
                     grafana_rows = None
+                    results = None
                     if isinstance(query_spec, dict):
                         try:
                             if use_range_mode:
@@ -790,17 +791,18 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                                 step=explicit_interval_seconds,
                                 align_to_step=True,
                             )
-                        else:
-                            results = None
                     else:
-                        logger.info("Query backend: direct-prometheus url=%s", PROMETHEUS_URL)
-                        results = query_prometheus_instant(expr_resolved, eval_time=end_dt)
+                        if grafana_rows is None or len(grafana_rows) == 0:
+                            if grafana_rows is not None and len(grafana_rows) == 0:
+                                logger.warning("Grafana datasource returned no rows for instant query; falling back to direct Prometheus")
+                            logger.info("Query backend: direct-prometheus url=%s", PROMETHEUS_URL)
+                            results = query_prometheus_instant(expr_resolved, eval_time=end_dt)
                 except Exception as e:
                     logger.error(f"Prometheus query failed for {expr_resolved}: {e}")
                     continue
 
                 rows = []
-                if grafana_rows is not None:
+                if grafana_rows:
                     for row in grafana_rows:
                         metric_labels = row.get("metric", {})
                         rows.append({
@@ -808,7 +810,7 @@ def process_report(dashboard_url: str, email_to: str = None, excluded_titles=Non
                             "department": metric_labels.get("department", "unknown"),
                             metric_name: float(row.get("value", 0.0)),
                         })
-                else:
+                elif results is not None:
                     for r in results.get("data", {}).get("result", []):
                         metric_labels = r.get("metric", {})
                         project = metric_labels.get("project", "unknown")
